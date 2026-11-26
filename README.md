@@ -89,7 +89,7 @@ LogLens 走的是第四条：Shizuku 已经用无线调试给你 shell 身份了
 
 ## 构建
 
-需要 JDK 17、Android SDK（compileSdk 37 平台）。
+需要 JDK 17 或更高（本仓库实际用 JDK 21 构建）、Android SDK（compileSdk 37 平台）。
 
 ```bash
 ./gradlew assembleDebug
@@ -105,7 +105,7 @@ keyAlias=release
 keyPassword=******
 ```
 
-放好后 `./gradlew assembleRelease` 会自动接上签名；没有这个文件时只产出未签名包。
+`keyAlias` 只是示例名，填你签名时用的那个 alias 就行（本仓库自用的是 `loglens`）。放好后 `./gradlew assembleRelease` 会自动接上签名；没有这个文件时只产出未签名包。
 
 ## 已知限制
 
