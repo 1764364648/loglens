@@ -1,4 +1,4 @@
-﻿package dev.loglens.diag
+package dev.loglens.diag
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
@@ -420,8 +420,17 @@ object DiagRepo {
 
     private fun parseLcTime(text: String): Long? = runCatching {
         val year = SimpleDateFormat("yyyy", Locale.US).format(Date())
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
-            .parse("$year-${text.trim()}")?.time
+        val parsed = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+            .parse("$year-${text.trim()}") ?: return@runCatching null
+        // logcat 的 MM-dd 无年份；跨年时按当前年补全会把去年 12 月算成未来时间，回退一年
+        if (parsed.time > System.currentTimeMillis() + 86_400_000L) {
+            java.util.Calendar.getInstance().apply {
+                timeInMillis = parsed.time
+                add(java.util.Calendar.YEAR, -1)
+            }.timeInMillis
+        } else {
+            parsed.time
+        }
     }.getOrNull()
 
     fun fmt(ms: Long?): String =

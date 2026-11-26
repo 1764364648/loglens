@@ -71,14 +71,17 @@ object ShizukuHelper {
             onResult(true)
             return
         }
-        context?.let { markAsked(it) }
         releaseListener()
         val listener = Shizuku.OnRequestPermissionResultListener { code, grantResult ->
             if (code == PERMISSION_REQUEST_CODE) {
+                val granted = grantResult == PackageManager.PERMISSION_GRANTED
+                // 只有真正被拒绝才记「问过了」。请求还在弹窗中时 shouldShowRationale 也是 false，
+                // 如果在发起前就记，会把「弹窗等待中」误判成「拒绝且不再询问」。
+                if (!granted) context?.let { markAsked(it) }
                 releaseListener()
                 val cb = lastResult
                 lastResult = null
-                cb?.invoke(grantResult == PackageManager.PERMISSION_GRANTED)
+                cb?.invoke(granted)
             }
         }
         pendingListener = listener

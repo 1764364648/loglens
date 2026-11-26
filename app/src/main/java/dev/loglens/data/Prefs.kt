@@ -159,10 +159,15 @@ class Prefs(context: Context) {
     /** 上一次自身崩溃的堆栈（首页展示，便于无 adb 环境下取日志） */
     var lastCrash: String
         get() = sp.getString(KEY_LAST_CRASH, "") ?: ""
-        // 崩溃路径写盘必须同步，apply() 异步落盘来不及，进程一挂就丢了
-        set(value) {
-            sp.edit().putString(KEY_LAST_CRASH, value).commit()
-        }
+        set(value) = sp.edit().putString(KEY_LAST_CRASH, value).apply()
+
+    /**
+     * 崩溃处理器专用：进程马上要挂，apply() 的异步落盘来不及，必须同步 commit。
+     * 普通 UI 清空走 [lastCrash] 的 apply()，避免主线程同步写盘。
+     */
+    fun setLastCrashSync(value: String) {
+        sp.edit().putString(KEY_LAST_CRASH, value).commit()
+    }
 
     /** 自定义高亮规则（JSON 数组） */
     var highlightRulesJson: String

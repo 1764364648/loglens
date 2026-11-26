@@ -22,7 +22,8 @@ object CrashNotifier {
     private const val NOTI_ID = 2001
     private const val THROTTLE_MS = 30_000L
 
-    private val lastNotifiedAt = HashMap<String, Long>()
+    // main / events 两条 logcat 读线程都会回调 onEntry，节流表必须线程安全
+    private val lastNotifiedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

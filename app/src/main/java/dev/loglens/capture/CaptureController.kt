@@ -48,6 +48,13 @@ object CaptureController {
     /** 正在换代：主动停旧引擎时 onExit 不能把新会话的状态清掉 */
     private var restarting = false
 
+    /**
+     * 会话令牌：start/resume/stop 都会递增。启动协程里有多处 Shizuku 往返，
+     * 用户可能在「正在启动」时从通知点停止；令牌对不上就让旧启动流程自行退出，
+     * 否则会出现「服务已停、采集却复活且没有前台服务」的残局。
+     */
+    private val session = java.util.concurrent.atomic.AtomicLong(0)
+
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state
 
@@ -111,13 +118,16 @@ object CaptureController {
             engine?.stop()
             engine = null
             passive = false
+        } else {
+            // 上一次换代若被中途停止，restarting 可能还挂着；新会话必须清掉
+            restarting = false
         }
 
         val args = StartArgs(app, saveToFile, includeEvents, globalMode, buffers)
         lastArgs = args
         _paused.value = false
         if (!upgrading) _state.value = State.Preparing(app.label)
-        launchEngine(args, clearFirst = !upgrading)
+        launchEngine(args, clearFirst = !upgrading, sid = session.incrementAndGet())
     }
 
     /**
@@ -154,28 +164,32 @@ object CaptureController {
         val args = lastArgs ?: return
         if (!_paused.value) return
         _paused.value = false
-        launchEngine(args, clearFirst = false)
+        launchEngine(args, clearFirst = false, sid = session.incrementAndGet())
     }
 
     fun isPaused(): Boolean = _paused.value
 
-    private fun launchEngine(args: StartArgs, clearFirst: Boolean) {
+    private fun launchEngine(args: StartArgs, clearFirst: Boolean, sid: Long) {
         val ctx = appContext ?: return
         val app = args.app
 
         if (!ShizukuHelper.isBinderAlive()) {
+            if (session.get() != sid) return
             restarting = false
             _state.value = State.Failed("Shizuku 服务未运行。请先启动 Shizuku（无线调试方式），再回到本页重试。")
             return
         }
         if (!ShizukuHelper.isPermissionGranted()) {
+            if (session.get() != sid) return
             restarting = false
             _state.value = State.Failed("尚未获得 Shizuku 授权。请点击「请求授权」并在弹窗中允许。")
             return
         }
 
         scope.launch {
+            var createdWriter: FileLogWriter? = null
             try {
+                if (session.get() != sid) return@launch
                 if (clearFirst) {
                     LogRepository.clear()
                     _logFile.value = null
@@ -192,12 +206,20 @@ object CaptureController {
                 val pids = runCatching {
                     dev.loglens.shizuku.ShellRunner.pidsFor(app.packageName, uid)
                 }.getOrDefault(emptyList())
+                // 这些 shell 调用可能耗时几百毫秒，期间用户可能已经从通知点了停止
+                if (session.get() != sid) return@launch
 
                 if (args.saveToFile && writer == null) {
-                    writer = FileLogWriter(ctx).also {
-                        it.start(app.packageName)
-                        _logFile.value = it.currentFile?.absolutePath
-                    }
+                    val w = FileLogWriter(ctx)
+                    createdWriter = w
+                    w.start(app.packageName)
+                    writer = w
+                    _logFile.value = w.currentFile?.absolutePath
+                }
+                if (session.get() != sid) {
+                    if (writer === createdWriter) writer = null
+                    createdWriter?.stop()
+                    return@launch
                 }
 
                 // 旧引擎的线程可能晚于新会话才回调 onExit，用归属校验挡住，
@@ -205,7 +227,7 @@ object CaptureController {
                 var self: LogcatEngine? = null
                 val eng = LogcatEngine(object : LogcatEngine.Listener {
                     override fun onStarted(mode: String, command: String) {
-                        if (engine !== self) return
+                        if (engine !== self || session.get() != sid) return
                         restarting = false
                         _state.value = State.Capturing(
                             target = target,
@@ -239,6 +261,8 @@ object CaptureController {
 
                     override fun onFailure(message: String) {
                         if (engine !== self) return
+                        // 主 logcat 失败时 events 流、看门狗线程还活着，必须一起收掉，否则会泄漏进程
+                        self?.stop()
                         _state.value = State.Failed(message)
                         writer?.stop()
                         writer = null
@@ -246,6 +270,8 @@ object CaptureController {
 
                     override fun onExit(code: Int) {
                         if (engine !== self) return
+                        // logcat 自然退出时 events 子流不会自己结束；先做一次完整收摊
+                        self?.stop()
                         // 主动暂停 / 预录升级换代引发的退出：保留写入器与参数，别把新会话清掉
                         if (_paused.value || restarting) return
                         writer?.stop()
@@ -267,6 +293,13 @@ object CaptureController {
                 })
                 self = eng
                 engine = eng
+                if (session.get() != sid) {
+                    eng.stop()
+                    if (engine === eng) engine = null
+                    if (writer === createdWriter) writer = null
+                    createdWriter?.stop()
+                    return@launch
+                }
                 eng.start(
                     packageName = app.packageName,
                     uid = uid.takeIf { it > 0 },
@@ -275,20 +308,38 @@ object CaptureController {
                     globalMode = args.globalMode,
                     buffers = args.buffers
                 )
+                // start() 内部还要跑几次 shell；期间被停止时把刚拉起的进程再收掉
+                if (session.get() != sid) {
+                    eng.stop()
+                    if (engine === eng) {
+                        engine = null
+                        // 收掉可能被 onStarted 抢写回的 Capturing 残状态
+                        if (_state.value is State.Capturing) _state.value = State.Idle
+                    }
+                    if (writer === createdWriter) writer = null
+                    createdWriter?.stop()
+                }
             } catch (t: Throwable) {
                 // 换代或首次启动失败：必须复位 restarting，否则旧引擎的 onExit 会被永久吞掉
                 restarting = false
-                _state.value = State.Failed("启动失败：${t.message ?: t.javaClass.simpleName}")
-                writer?.stop()
-                writer = null
+                if (session.get() == sid) {
+                    _state.value = State.Failed("启动失败：${t.message ?: t.javaClass.simpleName}")
+                }
+                // 只清理本协程创建的对象，避免把新会话的 writer 一起关掉
+                if (writer === createdWriter) writer = null
+                createdWriter?.stop()
             }
         }
     }
 
     fun stop() {
+        session.incrementAndGet()
+        restarting = false
         engine?.stop()
         engine = null
-        writer?.stop()
+        // FileLogWriter.stop() 内部会 join 写线程（最多 1.5s）；本方法从 UI / 服务命令
+        // 调用时在主线程，不能同步等文件收尾，否则点「停止」会卡住界面。
+        val toClose = writer
         writer = null
         passive = false
         _paused.value = false
@@ -296,6 +347,7 @@ object CaptureController {
         if (_state.value !is State.Failed) {
             _state.value = State.Idle
         }
+        scope.launch { runCatching { toClose?.stop() } }
     }
 
     fun dismissFailure() {
@@ -318,13 +370,15 @@ object CaptureController {
         if (now - lastSnapshotAt < 20_000L) return
         lastSnapshotAt = now
 
-        val dir = java.io.File(ctx.getExternalFilesDir(null), "crash").apply { mkdirs() }
+        // 外部目录可能拿不到（存储已卸载/未挂载）：崩溃快照退回内部目录，别让功能静默失效
+        val base = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+        val dir = java.io.File(base, "crash").apply { mkdirs() }
         runCatching {
             dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(5)?.forEach { it.delete() }
         }
         val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date(now))
         val target = (state.value as? State.Capturing)?.target?.label ?: "未指定应用"
-        val recent = LogRepository.snapshot().takeLast(200)
+        val recent = LogRepository.recent(200)
         val f = java.io.File(dir, "crash_$stamp.log")
         f.bufferedWriter().use { w ->
             w.write("===== 崩溃现场快照 $stamp =====")

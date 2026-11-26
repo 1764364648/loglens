@@ -16,6 +16,10 @@ object OfflineImport {
     private val timeOnly = Regex(
         "^\\s*(\\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\s+(\\d+)\\s+(\\d+)\\s+([VDIWEFA])\\s+([^:]*?)\\s*:\\s?(.*)$"
     )
+    /** logcat -v time：`11-27 14:03:22.123 I/Tag( 1234): message` */
+    private val logcatTime = Regex(
+        "^\\s*((?:\\d{4}-)?\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\s+([VDIWEFA])/([^\\s(]+)\\s*\\(\\s*(\\d+)\\):\\s?(.*)$"
+    )
     private val brief = Regex("^\\s*([VDIWEFA])/([^\\s(]+)\\s*\\(\\s*(\\d+)\\):\\s?(.*)$")
 
     /** 补齐年份：没写年份的按当前年推，出现比现在更晚的月份视为去年 */
@@ -37,8 +41,9 @@ object OfflineImport {
             if (out.size >= maxLines) break
             if (raw.isEmpty()) continue
             val t = threadTime.find(raw)
-            val o = if (t == null) timeOnly.find(raw) else null
-            val b = if (t == null && o == null) brief.find(raw) else null
+            val lc = if (t == null) logcatTime.find(raw) else null
+            val o = if (t == null && lc == null) timeOnly.find(raw) else null
+            val b = if (t == null && lc == null && o == null) brief.find(raw) else null
             when {
                 t != null -> {
                     id += 1
@@ -50,6 +55,23 @@ object OfflineImport {
                         level = levelOf(t.groupValues[4]),
                         tag = t.groupValues[5].trim(),
                         message = t.groupValues[6],
+                        isCrash = false,
+                        isContinuation = false,
+                        isRaw = false
+                    )
+                    out.add(e)
+                    last = e
+                }
+                lc != null -> {
+                    id += 1
+                    val e = LogEntry(
+                        id = id,
+                        time = normalize(lc.groupValues[1]),
+                        pid = lc.groupValues[4].toIntOrNull() ?: 0,
+                        tid = 0,
+                        level = levelOf(lc.groupValues[2]),
+                        tag = lc.groupValues[3].trim(),
+                        message = lc.groupValues[5],
                         isCrash = false,
                         isContinuation = false,
                         isRaw = false

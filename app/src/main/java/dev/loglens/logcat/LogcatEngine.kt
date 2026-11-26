@@ -63,6 +63,12 @@ class LogcatEngine(private val listener: Listener) {
     @Volatile
     private var generation = 0
 
+    /**
+     * 每次 spawn 递增。看门狗自愈重启时会先 destroy 旧进程，旧进程的 exit 线程随后醒来；
+     * 如果它仍按 generation 判断，就会把刚恢复的新会话当作「日志流结束」清掉（并泄漏新进程）。
+     */
+    private val spawnToken = AtomicLong(0)
+
     /** 设备 logcat 接受 `--uid=` 时走服务端过滤（客户端仍按 pid 复核，双保险） */
     @Volatile
     private var serverUidFilter: Boolean = false
@@ -302,6 +308,7 @@ class LogcatEngine(private val listener: Listener) {
 
     /** 拉起 logcat 进程及其读线程。返回 false 表示彻底失败。 */
     private fun spawn(gen: Int): Boolean {
+        val mySpawn = spawnToken.incrementAndGet()
         runCatching { process?.destroy() }
         process = null
         runCatching { eventProcess?.destroy() }
@@ -346,18 +353,19 @@ class LogcatEngine(private val listener: Listener) {
                 }
         )
 
-        outThread = Thread({ readStdout(proc, gen) }, "logcat-stdout").apply {
+        outThread = Thread({ readStdout(proc, gen, mySpawn) }, "logcat-stdout").apply {
             isDaemon = true
             start()
         }
-        errThread = Thread({ readStderr(proc) }, "logcat-stderr").apply {
+        errThread = Thread({ readStderr(proc, mySpawn) }, "logcat-stderr").apply {
             isDaemon = true
             start()
         }
 
         Thread({
             val code = runCatching { proc.waitFor() }.getOrDefault(-1)
-            if (!running.get() || generation != gen) return@Thread
+            // 看门狗重启后旧进程的 exit 回调必须被忽略，否则会把新会话清成 Idle
+            if (mySpawn != spawnToken.get() || !running.get() || generation != gen) return@Thread
             running.set(false)
             diag("logcat 进程已退出（exit=$code）${stderrNote()}")
             runCatching { listener.onExit(code) }
@@ -405,7 +413,7 @@ class LogcatEngine(private val listener: Listener) {
         }
     }
 
-    private fun readStdout(proc: Process, gen: Int) {
+    private fun readStdout(proc: Process, gen: Int, spawn: Long) {
         val reader = BufferedReader(InputStreamReader(proc.inputStream, Charsets.UTF_8), 32 * 1024)
         var lastTime = ""
         var lastTag: String? = null
@@ -413,7 +421,7 @@ class LogcatEngine(private val listener: Listener) {
         try {
             while (true) {
                 val line = reader.readLine() ?: break
-                if (!running.get() || generation != gen) break
+                if (!running.get() || generation != gen || spawn != spawnToken.get()) break
                 if (line.isEmpty()) continue
 
                 lastDataAt = System.currentTimeMillis()
@@ -496,10 +504,13 @@ class LogcatEngine(private val listener: Listener) {
         }
     }
 
-    private fun readStderr(proc: Process) {
+    private fun readStderr(proc: Process, spawn: Long) {
         runCatching {
             BufferedReader(InputStreamReader(proc.errorStream, Charsets.UTF_8)).useLines { lines ->
-                lines.forEach { stderrTail = (stderrTail + it + "\n").takeLast(1_500) }
+                for (line in lines) {
+                    if (spawn != spawnToken.get()) break
+                    stderrTail = (stderrTail + line + "\n").takeLast(1_500)
+                }
             }
         }
     }
@@ -573,6 +584,8 @@ class LogcatEngine(private val listener: Listener) {
     fun stop() {
         running.set(false)
         generation++
+        // 让仍在读旧进程的线程和旧进程 exit 线程立刻失效
+        spawnToken.incrementAndGet()
         runCatching { process?.destroy() }
         process = null
         runCatching { eventProcess?.destroy() }

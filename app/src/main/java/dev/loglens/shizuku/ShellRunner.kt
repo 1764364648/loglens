@@ -73,6 +73,15 @@ object ShellRunner {
 
         runCatching { errDone.await(1, TimeUnit.SECONDS) }
 
+        // 超时/中途异常时 out/err 读线程可能仍阻塞在管道上；显式关流让它们退出并释放 fd，
+        // 否则 Shizuku 断连时会累积远端进程、文件描述符和读线程
+        runCatching { process.inputStream.close() }
+        runCatching { process.errorStream.close() }
+        runCatching { process.outputStream.close() }
+        runCatching { process.destroy() }
+        runCatching { outThread.join(200) }
+        runCatching { errThread.join(200) }
+
         return Result(code, out.toString(), err.toString())
     }
 
