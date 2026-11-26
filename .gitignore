@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Kotlin
+.kotlin/
+
+# 本机路径与签名材料，绝不入库
+local.properties
+keystore.properties
+*.jks
+*.keystore
+
+# IDE
+.idea/
+*.iml
+.cxx/
+.DS_Store
+
+# 构建/调试留下的临时文件
+*.log
+*.out
+*.err
+_test_*
+_perf_*
+
+# 产物
+*.apk
+*.aab
