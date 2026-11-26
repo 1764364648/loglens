@@ -15,6 +15,43 @@
   <img src="docs/screenshots/t_tools.png" width="250" alt="工具箱">
 </p>
 
+## 构建
+
+需要 JDK 17 和 Android SDK Platform 37（工程 `compileSdk = 37`），并让 Gradle 能找到 SDK：在 Android Studio 里同步一次会生成 `local.properties`（不入库），纯命令行则设置 `ANDROID_HOME`。
+
+### 用 Android Studio 打开
+
+1. 打开 Android Studio，选 **File → Open**，指向仓库根目录（`settings.gradle.kts`、`gradlew` 所在的那一层，不要只选 `app/`）。
+2. 等首次 Gradle Sync 完成：工程走 Gradle Wrapper，会自动下载 Gradle 9.5.0；若提示缺 Android SDK Platform 37，按 SDK Manager 的提示安装。
+3. 选 `app` 运行配置，连上设备或开好模拟器，点 Run 即可安装 debug 包。
+
+### 命令行构建 debug 包
+
+macOS / Linux（仓库里的 `gradlew` 没提交可执行位，用 `sh` 调用即可）：
+
+```bash
+sh gradlew assembleDebug
+```
+
+Windows：
+
+```bat
+gradlew.bat assembleDebug
+```
+
+产物：`app/build/outputs/apk/debug/app-debug.apk`。
+
+release 默认开 R8。要出可安装的 release 包，在仓库根目录放 `keystore.properties`（已被 `.gitignore` 排除）：
+
+```properties
+storeFile=/abs/path/to/release.jks
+storePassword=******
+keyAlias=release
+keyPassword=******
+```
+
+放好后 `sh gradlew assembleRelease` 会自动接上签名（Windows 用 `gradlew.bat assembleRelease`）；没有这个文件时只产出未签名包。
+
 ## 和同类工具的区别
 
 看懂一个第三方 App 为什么崩、为什么卡、为什么连不上网，现在只有三条路，每条都别扭：
@@ -84,26 +121,6 @@ LogLens 走的是第四条：Shizuku 已经用无线调试给你 shell 身份了
 4. 选目标应用 → 点开始捕获 → 回桌面看胶囊，或留在日志页看日志
 
 > 这是个人自用工具，侧载安装，不上架应用商店。release 走 R8 混淆，崩溃堆栈用构建时生成的 `mapping.txt` 还原。
-
-## 构建
-
-需要 JDK 17、Android SDK（compileSdk 37 平台）。
-
-```bash
-./gradlew assembleDebug
-# 产物：app/build/outputs/apk/debug/app-debug.apk
-```
-
-release 默认开 R8。要出可安装的 release 包，在仓库根目录放 `keystore.properties`（已在 `.gitignore` 排除）：
-
-```properties
-storeFile=/abs/path/to/release.jks
-storePassword=******
-keyAlias=release
-keyPassword=******
-```
-
-放好后 `./gradlew assembleRelease` 会自动接上签名；没有这个文件时只产出未签名包。
 
 ## 已知限制
 
