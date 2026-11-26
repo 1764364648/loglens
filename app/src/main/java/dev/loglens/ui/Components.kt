@@ -42,17 +42,33 @@ import kotlinx.coroutines.withContext
 fun rememberAppIcon(packageName: String, sizeDp: Int = 96): ImageBitmap? {
     val context = LocalContext.current
     val icon by produceState<ImageBitmap?>(initialValue = null, packageName, sizeDp) {
+        // 列表滚动时行会被回收重建，图标没必要每次重新解码，按「包名@像素」缓存一份
+        val key = "$packageName@${sizeDp}"
+        val cached = AppIconCache.get(key)
+        if (cached != null) {
+            value = cached
+            return@produceState
+        }
         value = withContext(Dispatchers.IO) {
-            runCatching {
+            AppIconCache.get(key) ?: runCatching {
                 val density = context.resources.displayMetrics.density
                 val px = (sizeDp * density).toInt().coerceAtLeast(1)
                 context.packageManager.getApplicationIcon(packageName)
                     .toBitmap(px, px)
                     .asImageBitmap()
-            }.getOrNull()
+            }.getOrNull()?.also { AppIconCache.put(key, it) }
         }
     }
     return icon
+}
+
+/** 图标小缓存：够一屏滚动复用就行，退出页面不清也不占多少内存 */
+private object AppIconCache {
+    private val map = android.util.LruCache<String, ImageBitmap>(48)
+    fun get(key: String): ImageBitmap? = map.get(key)
+    fun put(key: String, value: ImageBitmap) {
+        map.put(key, value)
+    }
 }
 
 @Composable
