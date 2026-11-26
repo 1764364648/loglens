@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -19,7 +20,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -83,6 +86,7 @@ fun SettingsScreen(
     var crashNotify by remember { mutableStateOf(prefs.crashNotify) }
     var logFileMaxMb by remember { mutableStateOf(prefs.logFileMaxMb) }
     var logFileKeep by remember { mutableStateOf(prefs.logFileKeep) }
+    var showPrivacy by remember { mutableStateOf(false) }
 
     val versionName = remember {
         runCatching {
@@ -367,6 +371,25 @@ fun SettingsScreen(
                     SectionHeader("关于")
                     AboutRow("版本", versionName)
                     AboutRow("包名", context.packageName, mono = true)
+                    HorizontalDivider(color = colors.outlineVariant)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showPrivacy = true },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "隐私说明",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            "读了什么、有没有联网 · 查看",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant
+                        )
+                    }
                     Text(
                         "日志读取依赖 Shizuku 的 shell 身份（uid 2000）。" +
                             "Shizuku 服务被系统杀掉后，需要重新用无线调试启动它，再回来授权一次。",
@@ -375,6 +398,10 @@ fun SettingsScreen(
                         lineHeight = 18.sp
                     )
                 }
+            }
+
+            if (showPrivacy) {
+                PrivacyDialog(onDismiss = { showPrivacy = false })
             }
 
             Text(
@@ -474,6 +501,96 @@ private fun StepButton(label: String, onClick: () -> Unit) {
             label,
             style = MaterialTheme.typography.titleMedium,
             color = colors.primary
+        )
+    }
+}
+
+/**
+ * 隐私说明：把清单里真正申请的敏感权限逐条摊开，说明读什么、写到哪、不读什么。
+ * 用弹窗而不是独立页，是为了让用户从设置里点两下就能看到，不必再去翻网页。
+ */
+@Composable
+private fun PrivacyDialog(onDismiss: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = colors.surfaceVariant,
+        title = { Text("隐私说明", style = MaterialTheme.typography.titleSmall) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "LogLens 不申请联网权限，没有统计 SDK，不上传任何数据。日志只留在你这台手机上。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurface,
+                    lineHeight = 19.sp
+                )
+
+                Text("读取了什么", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
+                PrivacyLine(
+                    "应用列表（QUERY_ALL_PACKAGES）",
+                    "只用来让你挑要抓日志的目标应用、把网络连接归到对应应用。只在内存里使用，不保存、不上传。"
+                )
+                PrivacyLine(
+                    "日志（经 Shizuku 的 shell 身份执行 logcat）",
+                    "只抓你选定的那个应用；全量模式由你主动开启。日志进入内存环形缓冲，超过设置的行数就丢最旧的。"
+                )
+                PrivacyLine(
+                    "退出与 ANR 记录（PACKAGE_USAGE_STATS，可选）",
+                    "如果你在系统设置里给了「使用情况访问」，诊断页可以直接读别的包的退出记录和 ANR 归因；不给就走 Shizuku 的 shell 通道，功能一样能用，只是慢一点。"
+                )
+                PrivacyLine(
+                    "悬浮窗（SYSTEM_ALERT_WINDOW）",
+                    "仅在你手动打开「悬浮窗」时使用，用来把日志浮在别的应用之上。关掉权限就不显示。"
+                )
+                PrivacyLine(
+                    "落盘（可选）",
+                    "开启后写入 Android/data/dev.loglens/files/，按你设置的单个文件上限与保留份数自动滚动删除。关闭即不再写入。"
+                )
+
+                Text("不读取什么", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
+                Text(
+                    "通讯录、短信、通话记录、相册、位置、账号信息一律不碰；也不采集设备标识符（IMEI / ANDROID ID / 序列号）。没有埋点，没有广告，没有崩溃上报。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 19.sp
+                )
+
+                Text("导出与删除", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
+                Text(
+                    "导出、存图、复制到 Download 全部由你手动触发，文件只落在本机。卸载 App 会删除应用私有目录里的全部落盘日志；Android/data 下的残留可以在系统文件管理里手动删。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    lineHeight = 19.sp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("知道了", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    )
+}
+
+@Composable
+private fun PrivacyLine(title: String, body: String) {
+    val colors = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            "· $title",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurface
+        )
+        Text(
+            body,
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant,
+            lineHeight = 17.sp
         )
     }
 }
