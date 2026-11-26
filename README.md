@@ -8,7 +8,12 @@
 - UI：Jetpack Compose + Miuix（HyperOS 观感，深色为主）
 - 无联网权限，无统计 SDK，日志不出本机
 
-![首页](docs/screenshots/t_home.png)
+<p align="center">
+  <img src="docs/app-icon-512.png" width="88" alt="LogLens"><br>
+  <img src="docs/screenshots/t_home.png" width="250" alt="首页">
+  <img src="docs/screenshots/t_net_global.png" width="250" alt="网络快照">
+  <img src="docs/screenshots/t_tools.png" width="250" alt="工具箱">
+</p>
 
 ## 和同类工具的区别
 
