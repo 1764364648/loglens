@@ -1,8 +1,8 @@
 # LogLens · 日志透镜
 
-装个 App，勾一个应用，就能在手机上实时看到**它自己的 logcat**——不用连线到电脑，不用 root，不用刷机。
+装个 App，勾一个应用，就能在手机上实时看到**它自己的 logcat**——不用 root、不用刷机、不用为看一眼日志去连电脑。前置只有一件：Shizuku 先激活一次（也不用 root，走无线调试）。
 
-借 Shizuku 的 shell 身份（uid 2000）拉起 `logcat`，用 `--uid=<uid>`（失败降级 `--pid`）只抓目标进程的日志；崩溃、ANR、binder 报错、私有目录写入，全在手机上，能落盘、能导出、能直接发给同事。
+借 Shizuku 的 shell 身份（uid 2000）拉起 `logcat`，用 `--uid=<uid>` 只抓目标进程；设备不认 `--uid` 时退化为全量输出 + 客户端按 pid 筛选（pid 集合每 4 秒刷新，进程重启会自动接上，不需要重选）。崩溃、ANR、binder 报错、App 自己打进日志的私有目录操作，全在手机上，能落盘、能导出、能直接发给同事。
 
 - 包名 `dev.loglens`｜Android 8.0+（minSdk 26）｜targetSdk 36｜release 包约 2.2 MB
 - UI：Jetpack Compose + Miuix（HyperOS 观感，深色为主）
@@ -44,7 +44,9 @@ LogLens 走的是第四条：Shizuku 已经用无线调试给你 shell 身份了
 
 ### 1. 以「应用」为维度，而不是 tag
 
-普通阅读器给你的是"整个系统的日志洪流"，你得自己筛。LogLens 直接拿目标应用的 uid 去抓，抓到的就是这个应用进程族自己产生的一切——包括它的子进程、它的私有目录读写、它的 binder 调用失败。不用知道它的 tag 叫什么，也不用背 `--uid`。
+普通阅读器给你的是"整个系统的日志洪流"，你得自己筛。LogLens 直接拿目标应用的 uid 去抓，抓到的就是这个应用进程族自己写进日志的东西——包括它的子进程、它在日志里打出来的私有目录操作、它的 binder 调用失败。不用知道它的 tag 叫什么，也不用背 `--uid`。
+
+> 一句边界话：`logcat` 看到的是「App 自己写进日志的内容」，不是内核视角。文件级的读写 syscall 它抓不到（那要走 inotify / strace）。私有目录**整段**（内部 `files/`、`cache/`）能看，是深度诊断里走 `run-as` 读的，前提是目标 App 是 debuggable。
 
 ### 2. 常驻胶囊就是主控台，而且状态是真的
 
@@ -110,8 +112,9 @@ keyPassword=******
 
 ## 已知限制
 
-- 必须有 Shizuku 在跑；Shizuku 被系统杀掉后采集会断流
+- 必须有 Shizuku 在跑；Shizuku 被系统杀掉、**或手机重启之后**，采集会断流，要重新用无线调试激活一次（root 或常驻 adb 环境除外）。这是 Shizuku 非 root 模式的固有前提，不是本工具的门槛
 - 部分 ROM（荣耀 / 华为）默认关掉 AP 日志，需要拨号盘工程码打开，App 内会给出引导
+- 深度诊断里「应用私有目录」的内部 `files/`、`cache/` 要靠 `run-as` 读，目标 App 不是 debuggable 时只能看到 `/sdcard/Android/data/<pkg>` 那一层
 - 不做完整抓包：VpnService + 自签 CA 必然撞 pinning，所以网络页只做连接快照
 - 暂停期间不抓日志，这段不会补回来——暂停就是"先不看了"；页面上的"暂停跟随"是另一件事，只控制列表滚不滚
 
