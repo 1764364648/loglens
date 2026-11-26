@@ -167,7 +167,7 @@ fun ToolsScreen(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "在面板里改",
+                            "进去改",
                             style = MaterialTheme.typography.labelSmall,
                             color = palette.info
                         )
@@ -179,7 +179,7 @@ fun ToolsScreen(
                             .height(48.dp),
                         shape = RoundedCornerShape(14.dp)
                     ) {
-                        Text("打开取证面板")
+                        Text("打开取证包")
                     }
                 }
             }
@@ -214,7 +214,7 @@ fun ToolsScreen(
             }
 
             Text(
-                text = "三个面板都会自动带上首页选中的目标应用；换应用回首页重选即可。",
+                text = "这三个工具都会自动带上首页选中的目标应用；换应用回首页重选即可。",
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
