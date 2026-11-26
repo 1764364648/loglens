@@ -84,6 +84,9 @@ dependencies {
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.2")
     implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.2")
 
+    // 代码里直接用了 Dispatchers/withContext/StateFlow/sample，显式声明，不靠 androidx 传递
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
