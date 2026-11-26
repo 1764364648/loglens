@@ -72,11 +72,13 @@ keyPassword=******
 
 ## 许可
 
-[PolyForm Noncommercial License 1.0.0](LICENSE)——一句话：**任何人都可以免费使用、修改、分发；但不得用于任何商业目的**，包括改名、换图标、换包名之后收费上架、卖源码、挂广告或作为付费服务的一部分。
+[GNU General Public License v3.0](LICENSE)（GPL-3.0-only）。
 
-- 这不是 OSI 认可的开源许可，属于 source-available：GitHub 上会显示 License: Other
-- 改了再发布，必须带上同一份许可全文与 `Required Notice` 版权行，不能抹掉出处
-- 想商用请先联系作者拿书面授权
+- 随便用、随便改、随便分发，商业使用也允许
+- 但分发原版或改过的版本时，必须一并提供完整源码、保留同一份许可、不得追加额外限制
+- 也就是说：谁想把这个项目改个皮、换套名字拿去闭源卖，就得把自己的改动也开源出来，而且下游可以合法免费再分发
+
+Copyright (C) 2026 Marvis。作为唯一版权人，作者本人保留了另行授权（dual licensing）的权利。
 
 ## 致谢
 
