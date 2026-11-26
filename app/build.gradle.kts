@@ -21,8 +21,8 @@ android {
         applicationId = "dev.loglens"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.2.2"
+        versionCode = 5
+        versionName = "1.2.3"
         vectorDrawables { useSupportLibrary = true }
     }
 

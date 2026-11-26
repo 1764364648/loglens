@@ -9,7 +9,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 服务端日志取证（一键）。
+ * 取证包（一键）。
  *
  * 场景固定为「屏幕采集服务（Shower / 虚拟显示）在无 binder 客户端后自行退出，
  * 导致宿主进程被 137 杀掉」这一类问题：
@@ -23,7 +23,7 @@ import java.util.Locale
  * 5. 全部落到 app 专属外部目录 forensics/ 下，走 FileProvider 直接分享；
  * 6. 可选再把整份 server 日志 cp 到 /sdcard/Download，方便用文件管理器取。
  *
- * 判定口径：出现 "No active Binder clients for 1500ms！" 即确认服务端主动回收会话，
+ * 判定口径：出现 "No active Binder clients for 1500ms！" 即确认服务主动回收会话，
  * 137（SIGKILL）属于该链路的结果，不是被杀错。
  */
 object Forensics {
@@ -64,6 +64,22 @@ object Forensics {
         SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
     private fun q(s: String): String = "'" + s.replace("'", "'\\''") + "'"
+
+    /**
+     * 列出某个目录下的普通文件，给「取证包」页面做日志路径候选。
+     * 用 shell 的 ls -l 解析，避免在主机侧只为了列目录就拉一次 dumpsys。
+     */
+    fun listServerLogs(dir: String = "/data/local/tmp"): List<Pair<String, Long>> {
+        val r = runCatching { ShellRunner.exec("ls -l $dir 2>&1", 15_000L) }.getOrNull() ?: return emptyList()
+        if (r.code != 0) return emptyList()
+        val re = Regex("^[bcdlps-][rwxsStT-]{9}\\s+\\S+\\s+\\S+\\s+\\S+\\s+(\\d+)\\s+.*?(\\S+)$")
+        return r.stdout.lineSequence().mapNotNull { line ->
+            val m = re.find(line.trim()) ?: return@mapNotNull null
+            val size = m.groupValues[1].toLongOrNull() ?: return@mapNotNull null
+            val name = m.groupValues[2]
+            "$dir/$name" to size
+        }.distinctBy { it.first }.sortedByDescending { it.second }.toList()
+    }
 
     fun dirOf(context: Context, pkg: String, at: Long = System.currentTimeMillis()): File =
         File(context.getExternalFilesDir(null), "forensics/${pkg.ifBlank { "unknown" }}_${stampOf(at)}")
@@ -205,13 +221,13 @@ object Forensics {
 
             missing -> {
                 level = 1
-                verdict = "server 日志读不到（不存在或无权限）：服务端可能没有以 shell 身份写入 /data/local/tmp，" +
+                verdict = "服务日志读不到（不存在或无权限）：该服务可能没有以 shell 身份写入 /data/local/tmp，" +
                     "或已随进程重启被清空。看 ④b 的 run-as 结果，或改用应用私有目录里的分身日志。"
             }
 
             else -> {
                 level = 0
-                verdict = "未命中任何关键句：本轮窗口内服务端可能没有重启过，或日志已被轮转/清空。" +
+                verdict = "未命中任何关键句：本轮窗口内该服务可能没有重启过，或日志已被轮转/清空。" +
                     "建议复现问题后立刻重跑一审。"
             }
         }
@@ -248,7 +264,7 @@ object Forensics {
         }
 
         val report = buildString {
-            appendLine("===== LogLens 服务端日志取证 =====")
+            appendLine("===== LogLens 取证包 =====")
             appendLine("目标：$pkg")
             appendLine("时间：${DiagRepo.fmtFull(started)}")
             appendLine("设备：${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")

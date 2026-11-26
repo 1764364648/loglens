@@ -1,6 +1,7 @@
 package dev.loglens.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,11 +10,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Info
@@ -26,6 +30,7 @@ import dev.loglens.ui.mx.ExperimentalMaterial3Api
 import dev.loglens.ui.mx.HorizontalDivider
 import dev.loglens.ui.mx.Icon
 import dev.loglens.ui.mx.IconButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import dev.loglens.ui.mx.OutlinedTextField
 import dev.loglens.ui.mx.Scaffold
@@ -53,7 +58,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 服务端日志取证页：一键跑完「探测 → 关键句抽取 → tag 过滤 → 尾部导出 → 分享」。
+ * 取证包：一键跑完「探测 → 关键句抽取 → tag 过滤 → 尾部导出 → 分享」。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -79,6 +84,7 @@ fun ForensicsScreen(
     var steps by remember { mutableStateOf(listOf<Forensics.Step>()) }
     var result by remember { mutableStateOf<Forensics.Result?>(null) }
     var expanded by remember { mutableStateOf(-1) }
+    var listing by remember { mutableStateOf<List<Pair<String, Long>>?>(null) }
 
     fun persist() {
         prefs.forensicLogPath = logPath
@@ -118,7 +124,7 @@ fun ForensicsScreen(
         containerColor = colors.background,
         topBar = {
             TopAppBar(
-                title = { Text("服务端日志取证", style = MaterialTheme.typography.titleMedium) },
+                title = { Text("取证包", style = MaterialTheme.typography.titleMedium) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
@@ -166,8 +172,8 @@ fun ForensicsScreen(
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "针对「虚拟显示服务在无 binder 客户端后自退，导致宿主被 137」这一类问题的固定取证流程。" +
-                                "一键跑完：日志探测 → 关键句抽取 → main buffer 按 tag 过滤 → 尾部导出，最后直接分享文件。",
+                            "把「设备上某个服务自己写的日志文件」和「指定 tag 的 logcat 尾部」收成一份带结论的包，可直接分享。" +
+                                "默认适配「屏幕采集 / 虚拟显示」这类服务（无 binder 客户端后自退、宿主随后被 137）：路径与 tag 都能改成你自己的。",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant
                         )
@@ -187,13 +193,24 @@ fun ForensicsScreen(
                         OutlinedTextField(
                             value = logPath,
                             onValueChange = { logPath = it },
-                            label = { Text("server 日志路径") },
+                            label = { Text("服务日志文件路径") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                             textStyle = MaterialTheme.typography.bodySmall.copy(
                                 fontFamily = FontFamily.Monospace
                             )
                         )
+                        TextButton(
+                            onClick = {
+                                val parent = logPath.substringBeforeLast('/', "/data/local/tmp").ifBlank { "/data/local/tmp" }
+                                scope.launch {
+                                    listing = withContext(Dispatchers.IO) { Forensics.listServerLogs(parent) }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("不确定路径？列出该目录下的文件", style = MaterialTheme.typography.labelMedium)
+                        }
                         OutlinedTextField(
                             value = tagsText,
                             onValueChange = { tagsText = it },
@@ -429,7 +446,7 @@ fun ForensicsScreen(
                         Spacer(Modifier.size(8.dp))
                         Text(
                             "产物写在 Android/data/dev.loglens/files/forensics/ 下，走 FileProvider 分享，" +
-                                "不需要存储权限。server 日志尾部只带 2 万行，整份原件走 ⑤ 的 /sdcard/Download 复制。" +
+                                "不需要存储权限。服务日志尾部只带 2 万行，整份原件走 ⑤ 的 /sdcard/Download 复制。" +
                                 "日志路径不可读时看 ④b 的 run-as 兜底结果。",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant
@@ -438,5 +455,75 @@ fun ForensicsScreen(
                 }
             }
         }
+
+        if (listing != null) {
+            ForensicsPickDialog(
+                files = listing ?: emptyList(),
+                onPick = { logPath = it; persist(); listing = null },
+                onDismiss = { listing = null }
+            )
+        }
     }
+}
+
+@Composable
+private fun ForensicsPickDialog(
+    files: List<Pair<String, Long>>,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = colors.surfaceVariant,
+        title = { Text("选择服务日志文件", style = MaterialTheme.typography.titleSmall) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 380.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (files.isEmpty()) {
+                    Text(
+                        "这个目录下没读到文件。可能是 Shizuku 没授权、目录为空，或者服务根本没往这里写日志——那就手动填绝对路径。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant
+                    )
+                } else {
+                    files.forEach { (path, size) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(path) }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    path,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = colors.onSurface
+                                )
+                                Text(
+                                    Forensics.human(size),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                "选它",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.primary
+                            )
+                        }
+                        HorizontalDivider(color = colors.outlineVariant)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }

@@ -145,10 +145,10 @@ fun ToolsScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    SectionHeader("服务端日志取证")
+                    SectionHeader("取证包")
                     Text(
-                        "按标签把 logcat 拉成证据包：可指定标签、直接落路径，" +
-                            "配合线上复现拿一份能交给后端的时间线。",
+                        "把一个服务自己写的日志文件 + 指定 tag 的 logcat 尾部，收成一份带结论的证据包。" +
+                            "默认适配屏幕采集服务，路径和 tag 都能改；不确定文件在哪，进去列一下目录就能选。",
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant,
                         lineHeight = 18.sp

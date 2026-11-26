@@ -459,7 +459,7 @@ private fun HomeContent(
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        "深度诊断（应用档案 / 137 时间轴 / binder 聚类）、服务端日志取证",
+                        "深度诊断（应用档案 / 137 时间轴 / binder 聚类）、取证包",
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant,
                         maxLines = 2
