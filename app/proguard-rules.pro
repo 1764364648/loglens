@@ -5,7 +5,7 @@
 -dontwarn moe.shizuku.**
 
 # 反射/服务端桩（ShizukuProcess 用 declaredMethods + isAccessible 反射 newProcess）
--keep class com.marvis.shizukulog.** { *; }
+-keep class dev.loglens.** { *; }
 -keepclassmembers class rikka.shizuku.Shizuku {
     public static *** newProcess(...);
 }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Shizuku Logger</string>
+    <string name="app_name">日志透镜</string>
     <string name="capture_channel_name">日志捕获</string>
     <string name="capture_channel_desc">在后台持续捕获目标应用日志</string>
 </resources>

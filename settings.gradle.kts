@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ShizukuLogger"
+rootProject.name = "LogLens"
 include(":app")

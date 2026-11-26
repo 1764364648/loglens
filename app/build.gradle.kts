@@ -14,11 +14,11 @@ val keystoreProps = Properties().apply {
 val hasReleaseKeystore = keystorePropsFile.exists()
 
 android {
-    namespace = "com.marvis.shizukulog"
+    namespace = "dev.loglens"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.marvis.shizukulog"
+        applicationId = "dev.loglens"
         minSdk = 26
         targetSdk = 36
         versionCode = 3

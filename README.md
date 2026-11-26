@@ -1,8 +1,8 @@
-# Shizuku Logger
+# 日志透镜
 
 借 Shizuku 的 shell 身份（uid 2000）拉起 `logcat`，实时查看**任意指定应用**的日志。无需 root、无需解锁 BL、不需要 Xposed。
 
-- 包名：`com.marvis.shizukulog`
+- 包名：`dev.loglens`
 - 适用：Android 8.0+（minSdk 26），targetSdk 36
 - UI：Jetpack Compose + Miuix（HyperOS 观感），深色为主
 
@@ -64,7 +64,7 @@ keyPassword=******
 
 ## 隐私
 
-所有日志只留在本机：内存环形缓冲，以及 `Android/data/com.marvis.shizukulog/files/` 下的落盘与导出文件。App 不联网，不上传任何数据。
+所有日志只留在本机：内存环形缓冲，以及 `Android/data/dev.loglens/files/` 下的落盘与导出文件。App 不联网，不上传任何数据。
 
 ## 截图
 
@@ -78,7 +78,7 @@ keyPassword=******
 - 但分发原版或改过的版本时，必须一并提供完整源码、保留同一份许可、不得追加额外限制
 - 也就是说：谁想把这个项目改个皮、换套名字拿去闭源卖，就得把自己的改动也开源出来，而且下游可以合法免费再分发
 
-Copyright (C) 2026 Marvis。作为唯一版权人，作者本人保留了另行授权（dual licensing）的权利。
+Copyright (C) 2026 LogLens。作为唯一版权人，作者本人保留了另行授权（dual licensing）的权利。
 
 ## 致谢
 
