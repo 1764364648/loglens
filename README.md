@@ -10,9 +10,10 @@
 
 <p align="center">
   <img src="docs/app-icon-512.png" width="88" alt="LogLens"><br>
-  <img src="docs/screenshots/t_home.png" width="250" alt="首页">
-  <img src="docs/screenshots/t_net_global.png" width="250" alt="网络快照">
-  <img src="docs/screenshots/t_tools.png" width="250" alt="工具箱">
+  <img src="docs/screenshots/t_home.png" width="205" alt="首页：选目标应用">
+  <img src="docs/screenshots/t_log.png" width="205" alt="日志页：实时抓、按级别分色、搜索与崩溃计数">
+  <img src="docs/screenshots/t_net_global.png" width="205" alt="网络快照">
+  <img src="docs/screenshots/t_tools.png" width="205" alt="工具箱">
 </p>
 
 ## 和同类工具的区别
