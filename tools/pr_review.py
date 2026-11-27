@@ -25,13 +25,12 @@ LABEL_MID = "pr-review: 存疑"
 LABEL_BAD = "pr-review: 建议关闭（待决定）"
 LABELS = (LABEL_OK, LABEL_MID, LABEL_BAD)
 
-DEFAULT_BASE = "https://ark.cn-beijing.volces.com/api/v3"
-# 免费路线：GitHub 自带的 Models 网关，用工作流里的 GITHUB_TOKEN 就行（需要 models: read 权限）。
-GITHUB_MODELS_BASE = "https://models.github.ai/inference"
-MODELS_CANDIDATES = ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"]
-# 免费额度单次输入只有 8k token 左右，所以给模型的 diff 预算要缩小。
-ECO_FILE_CHARS = 5000
-ECO_TOTAL_CHARS = 16000
+# 配了 key 走智谱免费档（GLM-4.7-Flash：输入输出都免费，200K 上下文，OpenAI 兼容）；
+# 没配 key 走零密钥的免费网关，先让它能跑起来。
+DEFAULT_BASE = "https://open.bigmodel.cn/api/paas/v4"
+DEFAULT_MODEL = "glm-4.7-flash"
+FREE_BASE = "https://text.pollinations.ai/openai"
+FREE_MODEL = "openai"
 SKIP_EXT = {
     ".jar", ".aar", ".apk", ".aab", ".dex", ".so", ".dll", ".exe", ".bin",
     ".class", ".jks", ".keystore", ".p12", ".pfx", ".zip", ".7z", ".rar",
@@ -220,12 +219,8 @@ def build_user_prompt(meta, files, commits, note, eco=False):
     body = (meta.get("body") or "").strip()
     body = "（空）" if not body else body[:1200 if eco else 2000]
     commit_lines = [f"- {c['sha'][:7]} {c['commit']['message'].splitlines()[0][:120]}" for c in commits[:8 if eco else 12]]
-    diff, kept, skipped = collect_diff(
-        files,
-        ECO_FILE_CHARS if eco else MAX_FILE_CHARS,
-        ECO_TOTAL_CHARS if eco else MAX_TOTAL_CHARS,
-    )
-    budget = "（输入预算很紧：只报最关键的 5 条问题，句子尽量短，不要复述 diff。）" if eco else ""
+    diff, kept, skipped = collect_diff(files)
+    budget = ""
     return USER_TMPL.format(
         repo=meta["_repo"], num=meta["number"], author=meta["user"]["login"],
         age=meta.get("_author_age", "未知"), title=meta["title"], body=body,
@@ -408,23 +403,20 @@ def render(meta, rev, kept, skipped, model):
 
 
 # ---------------------------------------------------------------- 主流程
-def resolve_provider(api_key, base, model, gh):
-    """决定这次用哪个网关。没给密钥就用 GitHub Models（GITHUB_TOKEN，免费额度）。"""
-    on_models = False
-    if not api_key:
-        if base and "models.github.ai" not in base:
-            return None, "", "", False        # 指了外部服务却没密钥，跳过
-        api_key, base, on_models = gh, (base or GITHUB_MODELS_BASE), True
-        model = model or MODELS_CANDIDATES[0]
-    return api_key, base, model, on_models
+def resolve_provider(api_key, base, model):
+    """配了 key 用配置的模型，没 key 用零密钥免费网关；显式指了外部地址却没 key 就跳过。"""
+    if api_key:
+        return api_key, (base or DEFAULT_BASE), (model or DEFAULT_MODEL), "key"
+    if base and "pollinations" not in base:
+        return None, "", "", "none"
+    return "", (base or FREE_BASE), (model or FREE_MODEL), "free"
 
 
 def run(args):
-    key, base, model, on_models = resolve_provider(
+    key, base, model, mode = resolve_provider(
         os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
         os.environ.get("LLM_BASE_URL") or "",
         os.environ.get("LLM_MODEL") or "",
-        token(),
     )
     gh = token()
 
@@ -438,10 +430,11 @@ def run(args):
         print(body)
         return 0
 
-    if not (key and base and model):
-        msg = ("AI 评审未启用：没有可用的模型网关。默认走 GitHub 自带的免费 Models 网关"
-               "（工作流给 models: read 权限、用 GITHUB_TOKEN），也可以配 LLM_API_KEY + "
-               "LLM_BASE_URL + LLM_MODEL 换成自己的模型。当前两者都不可用。")
+    if not (base and model):
+        msg = ("AI 评审未启用：没配 LLM_API_KEY。免费方案是智谱的 GLM-4.7-Flash"
+               "（输入输出都免费，200K 上下文），到 bigmodel.cn 注册领 key，"
+               "在 Settings → Secrets 里加 LLM_API_KEY 即可；要用别家模型再配 "
+               "LLM_BASE_URL 与 LLM_MODEL。")
         print(msg)
         if args.summary_file:
             open(args.summary_file, "w", encoding="utf-8").write("<!-- pr-review -->\n" + msg + "\n")
@@ -479,10 +472,10 @@ def run(args):
             return 0
         note = "规则闸门 pr-audit 已通过。" if v == "ok" else "规则闸门结论未取到（可能还在跑）。"
 
-    eco = on_models or ("models.github.ai" in base)
+    eco = False
     user, kept, skipped = build_user_prompt(meta, files, commits, note, eco=eco)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
-    candidates = [model] if not on_models else ([model] + [m for m in MODELS_CANDIDATES if m != model])
+    candidates = [model]
     raw, used, last_err = None, model, None
     for cand in candidates:
         try:
@@ -511,7 +504,7 @@ def run(args):
                 "<!-- pr-review -->\n模型输出无法解析，本轮跳过。\n")
         return 0
 
-    label = used + ("（GitHub Models 免费额度）" if on_models else "")
+    label = used + ("（零密钥免费网关，质量一般，建议配免费 key）" if mode == "free" else "")
     body = render(meta, rev, kept, skipped, label)
     print(body)
     if args.summary_file:
@@ -565,14 +558,15 @@ def selftest():
     check("总量受限", len(diff) <= MAX_TOTAL_CHARS + 5000)
     check("并非全收", kept < 10)
 
-    k, b, m, onm = resolve_provider("sk-x", "", "my-model", "gh-token")
-    check("有密钥用自建网关", k == "sk-x" and m == "my-model" and onm is False)
-    k, b, m, onm = resolve_provider("", "", "", "gh-token")
-    check("无密钥回落 GitHub Models", onm is True and b == GITHUB_MODELS_BASE and k == "gh-token")
-    check("无密钥给默认模型", m == MODELS_CANDIDATES[0])
-    k, b, m, onm = resolve_provider("", "https://api.openai.com/v1", "", "gh-token")
-    check("外部网关无密钥则跳过（不外发令牌）", k is None and b == "")
-    check("免费额度预算更小", ECO_TOTAL_CHARS < MAX_TOTAL_CHARS)
+    k, b, m, mode = resolve_provider("sk-x", "", "my-model")
+    check("有密钥用配置的模型", k == "sk-x" and m == "my-model" and mode == "key")
+    k, b, m, mode = resolve_provider("sk-x", "", "")
+    check("默认走智谱免费模型", b == DEFAULT_BASE and m == DEFAULT_MODEL)
+    k, b, m, mode = resolve_provider("", "", "")
+    check("没密钥走零密钥网关", mode == "free" and b == FREE_BASE and m == FREE_MODEL)
+    k, b, m, mode = resolve_provider("", "https://api.openai.com/v1", "")
+    check("外部地址没密钥不硬发", k is None and mode == "none")
+    check("默认模型名是免费档", "flash" in DEFAULT_MODEL)
 
     one, _, _ = collect_diff([{"filename": "big.kt", "patch": "+" + "x" * 30000}], max_file=20000)
     check("单个文件被截断", "已截断" in one)
@@ -620,6 +614,13 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+
+
+
+
+
 
 
 

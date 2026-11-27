@@ -3,7 +3,7 @@ name: PR 评审（AI）
 # 建议性评审：先判「这个 PR 合不合理」，合理再评「写得怎么样」。
 # 只读 diff 文本，不 checkout、不执行 PR 代码；只发评论与标签，
 # 不合并、不关闭、不批准 —— 要不要关掉由维护者决定。
-# 没配 LLM_API_KEY 时自动用 GitHub 自带的 Models 网关（免费额度，靠 models: read）。
+# 免费：没配 LLM_API_KEY 时走零密钥的免费网关；配了就用智谱 GLM-4.7-Flash（输入输出都免费）。
 on:
   pull_request_target:
     branches: [main]
@@ -13,8 +13,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  # 免费路线：允许用工作流自带的 GITHUB_TOKEN 调 GitHub Models（有限速）
-  models: read
 
 concurrency:
   group: pr-review-${{ github.event.pull_request.number }}
@@ -65,6 +63,7 @@ jobs:
           code=$?
           { echo "<!-- pr-review -->"; cat review.md 2>/dev/null; } >> "$GITHUB_STEP_SUMMARY"
           exit $code
+
 
 
 
