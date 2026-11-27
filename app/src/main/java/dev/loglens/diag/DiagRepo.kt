@@ -17,6 +17,7 @@ import java.util.Locale
  *  3. ApplicationExitInfo（dumpsys activity exit-info）—— 137（128+SIGKILL）的创建到失效时间轴
  *  4. events buffer 时间轴（am_proc_start / am_kill / am_proc_died / am_anr）—— 进程生命周期与被谁杀
  *  5. crash buffer 现场（native crash / FATAL / tombstone 头部）
+ *  5b. dropbox 崩溃存档（dumpsys dropbox --print data_app_crash / data_app_anr 等）—— logcat 滚掉后仍在
  *  6. binder 相关告警聚类 + dumpsys binder_calls_stats（shell 视角）
  *  7. 应用私有目录（/sdcard/Android/data/<pkg> 与 run-as 内部 files/、cache/）—— 找 server 端 logToFile 落点
  *
@@ -297,6 +298,112 @@ object DiagRepo {
                 "若是 137（SIGKILL）死亡，本来就不会有 Java/native 栈——请看「137 / 进程终止」与「事件时间轴」两节。"
         }
         return keep.sorted().joinToString("\n") { lines[it] }
+    }
+
+    // ───────────────────────── 5b. dropbox 崩溃存档 ─────────────────────────
+
+    /** 系统在崩溃那刻自己抄的一份（/data/system/dropbox）。logcat 被后续日志滚掉之后，这里还在。 */
+    data class Crash(val at: Long?, val tag: String, val summary: String, val body: String) {
+        val kind: String
+            get() = when (tag) {
+                "data_app_crash" -> "Java 崩溃"
+                "data_app_native_crash" -> "native 崩溃"
+                "data_app_anr" -> "ANR"
+                "system_app_crash" -> "系统应用崩溃"
+                else -> tag
+            }
+    }
+
+    /**
+     * 按包名筛 dropbox 里的崩溃存档。
+     * 全部走 `dumpsys dropbox --print <tag>`：user 版机器不允许 adb pull /data/system/dropbox，
+     * 但 shell 有 DUMP 权限，`--print` 能把它解压打印出来，所以不需要 root。
+     * 输出按时间升序，取尾部 5000 行（dropbox 上限 1000 条，全量拉回可能十几万行）。
+     */
+    fun crashArchive(pkg: String): Pair<List<Crash>, String> {
+        val tags = listOf("data_app_crash", "data_app_native_crash", "data_app_anr", "system_app_crash")
+        val out = ArrayList<Crash>()
+        val sb = StringBuilder()
+        tags.forEach { tag ->
+            val r = ShellRunner.exec("dumpsys dropbox --print $tag 2>&1 | tail -n 5000", 30_000)
+            val text = (r.stdout + r.stderr).trim()
+            sb.append("## ").append(tag).append('\n').append(text).append("\n\n")
+            out.addAll(parseDropbox(text, pkg))
+        }
+        return out.sortedBy { it.at ?: 0L }.takeLast(30) to sb.toString()
+    }
+
+    /** dropbox 块里的固定字段行，用来跳过它们去找摘要（异常那行 / Abort message） */
+    private val DROPBOX_META = Regex(
+        "^(SystemUptimeMs|Process|PID|UID|Frozen|Timestamp|Flags|Package|Foreground|Process-Runtime|" +
+            "Activity|ErrorId|Build|DefaultScreen-State|Keyguard-Locked|Crash-Handler|Loading-Progress|" +
+            "Dropped-Count|Subject|Reason|Parent|Board|Brand|Device|Display|Fingerprint|Hardware|Host|" +
+            "Kernel|Manufacturer|Model|Product|Radio|Revision|Security-Patch-Level|Serial|Type|Version|User):"
+    )
+
+    private fun parseDropbox(text: String, pkg: String): List<Crash> {
+        val out = ArrayList<Crash>()
+        var header: String? = null
+        val body = StringBuilder()
+
+        fun flush() {
+            val h = header ?: return
+            val raw = body.toString().trim()
+            header = null
+            body.setLength(0)
+            val m = Regex("^(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})\\s+(\\S+)").find(h) ?: return
+            val tag = m.groupValues[2]
+            val pkgField = Regex("(?m)^Package: ([^\\s]+)").find(raw)?.groupValues?.get(1)
+            val procField = Regex("(?m)^Process: ([^\\s]+)").find(raw)?.groupValues?.get(1)
+            val hit = when {
+                pkgField != null -> pkgField == pkg
+                procField != null -> procField == pkg || procField.startsWith("$pkg:")
+                else -> raw.contains(pkg)
+            }
+            if (!hit) return
+            val ts = Regex("(?m)^Timestamp: (\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})\\.(\\d+)")
+                .find(raw)?.groupValues?.get(1) ?: m.groupValues[1]
+            val summary = crashSummary(raw)
+            out.add(Crash(parseFullTime(ts), tag, summary, raw.take(24_000)))
+        }
+
+        text.lineSequence().forEach { line ->
+            val t = line.trim()
+            when {
+                t.length >= 8 && t.all { it == '=' } -> flush()
+                header == null && t.matches(Regex("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} .+")) -> header = t
+                header != null -> body.append(t).append('\n')
+            }
+        }
+        flush()
+        return out
+    }
+
+    /**
+     * 一行摘要。不同标签的块结构完全不同：
+     *  - Java 崩溃：正文第一行就是异常（`java.lang.Xxx: ...`）
+     *  - native 崩溃：开头是一串 `***` 横幅，真正的因在 `Abort message:` / `signal 6 (SIGABRT)`
+     *  - ANR：开头是一堆 /proc/pressure 观测，正文里通常只有 `Subject:`/`Reason:`，否则只能靠 Activity + ErrorId
+     */
+    private fun crashSummary(raw: String): String {
+        val lines = raw.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }
+        val priority = listOf(
+            Regex("^Abort message:"),
+            Regex("^signal \\d+"),
+            Regex("^Subject:"),
+            Regex("^Reason:"),
+            Regex("^(FATAL EXCEPTION|java\\.|android\\.|kotlin\\.|com\\.|org\\.).*(Exception|Error)")
+        )
+        priority.forEach { p -> lines.firstOrNull { p.containsMatchIn(it) }?.let { return it } }
+        val activity = Regex("(?m)^Activity: (\\S+)").find(raw)?.groupValues?.get(1)
+        val errorId = Regex("(?m)^ErrorId: (\\S+)").find(raw)?.groupValues?.get(1)
+        if (activity != null) {
+            return "ANR / 卡死：$activity" + (errorId?.let { "  · errorId=$it" } ?: "")
+        }
+        return lines.firstOrNull {
+            !DROPBOX_META.containsMatchIn(it) &&
+                !it.startsWith("***") && !it.startsWith("-----") && !it.startsWith("#")
+        } ?: "（没有摘要行）"
     }
 
     // ───────────────────────── 6. binder 压力 ─────────────────────────

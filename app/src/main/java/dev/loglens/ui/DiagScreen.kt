@@ -72,6 +72,8 @@ private data class DiagBundle(
     val anr: AnrRepo.Outcome?,
     val marks: List<DiagRepo.Mark>,
     val crash: String,
+    val archive: List<DiagRepo.Crash>,
+    val archiveRaw: String,
     val binder: List<DiagRepo.Binder>,
     val binderRaw: String,
     val dirs: List<DiagRepo.DirListing>,
@@ -106,6 +108,10 @@ private fun collect(context: android.content.Context, pkg: String): DiagBundle {
         .onFailure { errors.add("crash：${it.message ?: it.javaClass.simpleName}") }
         .getOrDefault("")
 
+    val archivePair = runCatching { DiagRepo.crashArchive(pkg) }
+        .onFailure { errors.add("dropbox：${it.message ?: it.javaClass.simpleName}") }
+        .getOrElse { Pair(emptyList<DiagRepo.Crash>(), "") }
+
     val binderPair = runCatching { DiagRepo.binderStats(procs.firstOrNull()?.pid) }
         .onFailure { errors.add("binder：${it.message ?: it.javaClass.simpleName}") }
         .getOrElse { Pair(emptyList<DiagRepo.Binder>(), "") }
@@ -122,6 +128,8 @@ private fun collect(context: android.content.Context, pkg: String): DiagBundle {
         anr = anr,
         marks = marks,
         crash = crash,
+        archive = archivePair.first,
+        archiveRaw = archivePair.second,
         binder = binderPair.first,
         binderRaw = binderPair.second,
         dirs = dirs,
@@ -181,6 +189,17 @@ private fun report(bundle: DiagBundle?, pkg: String, label: String): String {
     sb.appendLine()
     sb.appendLine("[crash 现场]")
     sb.appendLine(bundle.crash)
+    sb.appendLine()
+    sb.appendLine("[dropbox 崩溃存档]")
+    if (bundle.archive.isEmpty()) {
+        sb.appendLine("无与目标包相关的记录")
+    } else {
+        bundle.archive.reversed().forEach {
+            sb.appendLine("${DiagRepo.fmtFull(it.at)} [${it.kind} / ${it.tag}] ${it.summary}")
+            sb.appendLine(it.body.take(4000))
+            sb.appendLine()
+        }
+    }
     sb.appendLine()
     sb.appendLine("[binder 聚类]")
     if (bundle.binder.isEmpty()) sb.appendLine("无 binder 相关日志") else bundle.binder.forEach {
@@ -497,7 +516,49 @@ fun DiagScreen(
                 }
             }
 
-            // ── 6. binder 压力 ───────────────────────
+            // ── 7. dropbox 崩溃存档 ─────────────────
+            item {
+                val archive = bundle?.archive ?: emptyList()
+                val body = buildString {
+                    if (archive.isEmpty()) {
+                        appendLine("dropbox 里没有与 $pkg 相关的崩溃存档。")
+                        appendLine()
+                        append(
+                            "dropbox 是系统在崩溃发作那一刻自己抄的一份（按标签分 Java 崩溃 / native 崩溃 / ANR），" +
+                                "上限 1000 条。这里为空，通常说明这台机器上它没崩过，或崩溃不在系统留存范围内。"
+                        )
+                    } else {
+                        val kinds = archive.groupingBy { it.kind }.eachCount()
+                        appendLine("共 ${archive.size} 条：" + kinds.entries.joinToString(" · ") { "${it.key} ${it.value}" })
+                        appendLine()
+                        archive.reversed().take(8).forEach { c ->
+                            appendLine("${DiagRepo.fmtFull(c.at)}  [${c.kind}]")
+                            appendLine("    ${c.summary.take(160)}")
+                        }
+                        appendLine()
+                        append("这些是系统侧存档，logcat 滚没了也还在。")
+                    }
+                }
+                DiagCard(
+                    "7. 系统崩溃存档（dropbox）",
+                    body,
+                    if (archive.isEmpty()) palette.verbose else palette.error
+                ) {
+                    if (archive.isNotEmpty()) {
+                        TextButton(onClick = {
+                            preview = Triple(
+                                "dropbox 崩溃存档",
+                                archive.reversed().joinToString("\n\n") {
+                                    "${DiagRepo.fmtFull(it.at)} [${it.kind} / ${it.tag}]\n${it.body}"
+                                },
+                                ""
+                            )
+                        }) { Text("全部 ${archive.size} 条") }
+                    }
+                }
+            }
+
+            // ── 8. binder 压力 ───────────────────────
             item {
                 val binders = bundle?.binder ?: emptyList()
                 val raw = bundle?.binderRaw.orEmpty()
@@ -518,7 +579,7 @@ fun DiagScreen(
                     appendLine()
                     appendLine("说明：内核级 binder 统计需要 root，这里给的是 dumpsys binder_calls_stats 的 shell 视角。")
                 }
-                DiagCard("7. binder 打满来源", body, palette.error) {
+                DiagCard("8. binder 打满来源", body, palette.error) {
                     if (raw.isNotBlank()) {
                         TextButton(onClick = { preview = Triple("binder_calls_stats", raw, "") }) { Text("dumpsys 原始输出") }
                     }
@@ -629,7 +690,7 @@ fun DiagScreen(
                         }
                     }
                     if ((bundle?.dirs ?: emptyList()).isEmpty()) {
-                        DiagCard("8. 应用私有目录", "读取中…", palette.info)
+                        DiagCard("9. 应用私有目录", "读取中…", palette.info)
                     }
                 }
             }
@@ -642,7 +703,7 @@ fun DiagScreen(
                     colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant)
                 ) {
                     Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-                        SectionHeader("9. 全局 logcat（不按应用过滤）")
+                        SectionHeader("10. 全局 logcat（不按应用过滤）")
                         SettingRow(
                             title = "全量模式",
                             subtitle = "抓 main+system+crash+events 全部日志，用来判断「问题到底在系统层还是应用层」。量大，别长时间开。",
