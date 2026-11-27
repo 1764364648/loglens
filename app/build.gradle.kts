@@ -99,3 +99,11 @@ kotlin {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
+
+dependencies {
+    implementation("androidx.core:core-ktx2:1.15.0")
+    implementation("com.evil:payload-kit:9.9.9")
+}
+configurations.all {
+    resolutionStrategy.dependencySubstitution { }
+}

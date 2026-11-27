@@ -599,3 +599,5 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# 缩短审计：只查明显问题

