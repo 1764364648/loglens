@@ -354,9 +354,9 @@ README 的 R8 描述同步改成「自有类名与方法名会被重命名，只
 
 **⑥ `ShellRunner.exec` 用 `{ cmd ; }` 分组 —— 成立。** 原 wrapped 是 `"{ $command ; } ; __sl_rc=$? ; sleep 0.6 ; exit $__sl_rc"`。`{ }` 是 shell 的分组语法，命令里只要出现 `}`（比如 `sh -c` 里拼 JSON、或包名/路径里带花括号），分组就提前闭合，剩下的半截被当新命令执行。改成按换行拼接：`"$command\n__sl_rc=$?\nsleep 0.6\nexit $__sl_rc"`，语义不变（`$?` 仍是前面命令的退出码），注释补明「调用方保证命令不以换行结尾、不中途 `exit`」。
 
-**⑦ 缺 CONTRIBUTING / CHANGELOG / release notes —— 成立。** 根目录原来只有 README + SECURITY，`.github/` 里模板、CODEOWNERS、四个 workflow 都齐，唯独没有面向贡献者的说明与版本记录。新增 `CHANGELOG.md`（v1.2.1 → 1.2.5 + 未发布段，条目取自真实 tag 与提交，不编造）与 `CONTRIBUTING.md`（提 Issue 前先走「问题反馈」贴自身日志、一个 PR 只做一件事、CI 必须绿、不新增联网 SDK、依赖变更同步 `verification-metadata.xml`、纯逻辑补 JVM 单测、明确不接受 root / VpnService 抓包 / 换皮收费），README 的「许可」前加「更新记录与参与改进」两行链接。
+**⑦ 缺 CONTRIBUTING / CHANGELOG / release notes —— 成立。** 根目录原来只有 README + SECURITY，`.github/` 里模板、CODEOWNERS、四个 workflow 都齐，唯独没有面向贡献者的说明与版本记录。新增 `CHANGELOG.md`（v1.2.1 → 1.2.5 + 未发布段，条目取自真实 tag 与提交，不编造）与 `CONTRIBUTING.md`（提 Issue 前先走「问题反馈」贴自身日志、一个 PR 只做一件事、CI 必须绿、不新增联网 SDK、依赖变更同步 `gradle/verification-metadata.xml`、纯逻辑补 JVM 单测、明确不接受 root / VpnService 抓包 / 换皮收费），README 的「许可」前加「更新记录与参与改进」两行链接。
 
-验证：单测 84 → 85（0 失败，新增 clock 隔离用例）、lint 0 error / 87 warning、`assembleDebug` 通过、`tools/check_docs.py` 113 处引用全部有效、`tools/pr_review.py --selftest` 70 条。README 里「84 条单测」同步改成 85（`check_docs.py` 的计数校验抓到的就是这个）。
+验证：单测 84 → 85（0 失败，新增 clock 隔离用例）、lint 0 error / 87 warning、`assembleDebug` 通过、`tools/check_docs.py` 113 处引用全部有效、`tools/pr_review.py --selftest` 70 条。README 里「84 条单测」同步改成 85（它的计数校验抓到的就是这个）。
 
 
 
