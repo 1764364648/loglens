@@ -490,10 +490,17 @@ def upsert_comment(pr, repo, tok, body):
     for c in pr_comments(pr, repo, tok):
         if marker in (c.get("body") or ""):
             try:
-                return api(f"https://api.github.com/repos/{repo}/issues/{pr}/comments/{c['id']}", tok,
-                           method="PATCH", payload={"body": full})
-            except Exception:
-                pass
+                api(f"https://api.github.com/repos/{repo}/issues/{pr}/comments/{c['id']}", tok,
+                    method="PATCH", payload={"body": full})
+                print(f"已更新原评论 {c['id']}", file=sys.stderr)
+                return None
+            except Exception as e:
+                detail = ""
+                try:
+                    detail = e.read().decode()[:200]
+                except Exception:
+                    pass
+                print(f"更新原评论失败 {c['id']}：{type(e).__name__} {e} {detail}", file=sys.stderr)
     return api(f"https://api.github.com/repos/{repo}/issues/{pr}/comments", tok,
                method="POST", payload={"body": full})
 
