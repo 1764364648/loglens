@@ -21,8 +21,10 @@ import java.util.concurrent.atomic.AtomicLong
  *    （`logcat --uid=<uid>`，应用重启、多进程都自动覆盖，不依赖 tag 命名）；设备不支持或静默忽略
  *    时（荣耀/华为等魔改 logcat，探测见 ShellRunner.supportsUidFilter）自动退回客户端按 pid 过滤。
  *    服务端过滤生效时客户端仍按 pid 复核，双保险，避免被静默忽略后变成全量 dump。
- * 2. **绝不做 host 侧 grep**：过滤只发生在 logcat 参数或逐行 pid 比对，不拼接 grep/sh 管道，
- *    避免 shell 引号与 glob（`*:S` 之类）在 Shizuku 的 sh -c 下失效。
+ * 2. **绝不做 host 侧 grep 过滤日志**：日志行只在 logcat 参数或逐行 pid 比对里筛，不拼
+ *    grep/sh 管道去过滤日志内容，避免 shell 引号与 glob（`*:S` 之类）在 Shizuku 的 sh -c 下失效。
+ *    例外是 `dumpsys` / `ps` 这类一次性元数据查询（例如 ShellRunner.uidOf 取 userId 时用
+ *    `grep -m 1`）：它们不掺日志内容，管道只用来省传输，包名按 sh 单引号转义后拼接。
  * 3. **缓冲区分流**：main/system/crash 一条流；events 单独一条流（其记录由 system_server 写入，
  *    pid 不是目标应用，混进 pid 过滤会被全部丢掉）。
  * 4. **pid 集合定时刷新**：应用重启、新开子进程（多进程应用）后自动跟上。

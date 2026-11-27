@@ -105,9 +105,16 @@ object ShellRunner {
         return map
     }
 
-    /** 单包 uid，失败返回 null */
+    /**
+     * 单包 uid，失败返回 null。
+     *
+     * 这里的 `| grep` 与 LogcatEngine 原则二「不做 host 侧 grep」不冲突：那条原则管的是
+     * **日志行过滤**（怕 shell 引号和 `*:S` 这类 glob 在 sh -c 下失效），一次性 dumpsys
+     * 元数据查询不在此列，管道在这里只是省传输量。
+     * 包名一律按 sh 单引号包裹：合法包名里不会有引号，但拼命令时该有的边界要有。
+     */
     fun uidOf(packageName: String): Int? {
-        val r = exec("dumpsys package $packageName | grep -m 1 userId=", 10_000)
+        val r = exec("dumpsys package '$packageName' | grep -m 1 userId=", 10_000)
         val m = Regex("userId=(\\d+)").find(r.stdout)
         return m?.groupValues?.get(1)?.toIntOrNull()
     }
@@ -118,7 +125,7 @@ object ShellRunner {
      * 正式路径走 [pidsFor] 的 ps 表解析。
      */
     fun pidsOf(packageName: String): List<Int> {
-        val r = exec("pidof -s $packageName", 6_000)
+        val r = exec("pidof -s '$packageName'", 6_000)
         val text = r.stdout.ifBlank { r.stderr }
         return text.split(' ', '\n')
             .mapNotNull { it.trim().toIntOrNull() }
