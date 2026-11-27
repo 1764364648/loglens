@@ -1,0 +1,65 @@
+name: PR 评审（AI）
+
+# 建议性评审：先判「这个 PR 合不合理」，合理再评「写得怎么样」。
+# 只读 diff 文本，不 checkout、不执行 PR 代码；只发评论与标签，
+# 不合并、不关闭、不批准 —— 要不要关掉由维护者决定。
+# 没配 LLM_API_KEY 时自动跳过，不会留评论。
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-review:
+    name: pr-review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - name: 从基线取评审脚本（不执行 PR 代码）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, pathlib, urllib.request
+          repo, sha = os.environ["REPO"], os.environ["BASE_SHA"]
+          dst = pathlib.Path(".review/pr_review.py")
+          dst.parent.mkdir(exist_ok=True)
+          url = f"https://api.github.com/repos/{repo}/contents/tools/pr_review.py?ref={sha}"
+          req = urllib.request.Request(url, headers={
+              "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+              "Accept": "application/vnd.github+json"})
+          data = json.load(urllib.request.urlopen(req, timeout=30))
+          dst.write_bytes(base64.b64decode(data["content"]))
+          print(f"pr_review.py 取自基线提交 {data['sha'][:12]}")
+          PY
+
+      - name: 评审脚本自测（31 条，防止渲染与去重逻辑被改坏）
+        run: python3 .review/pr_review.py --selftest
+
+      - name: 评审并留言
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+        run: |
+          set +e
+          python3 .review/pr_review.py --pr "$PR" --repo "$REPO" \
+            --comment --ensure-labels --wait-audit 90 --summary-file review.md
+          code=$?
+          { echo "<!-- pr-review -->"; cat review.md 2>/dev/null; } >> "$GITHUB_STEP_SUMMARY"
+          exit $code
