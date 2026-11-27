@@ -490,7 +490,7 @@ def upsert_comment(pr, repo, tok, body):
     for c in pr_comments(pr, repo, tok):
         if marker in (c.get("body") or ""):
             try:
-                api(f"https://api.github.com/repos/{repo}/issues/{pr}/comments/{c['id']}", tok,
+                api(f"https://api.github.com/repos/{repo}/issues/comments/{c['id']}", tok,
                     method="PATCH", payload={"body": full})
                 print(f"已更新原评论 {c['id']}", file=sys.stderr)
                 return None
