@@ -216,65 +216,69 @@ object ExportFormats {
     /** PDF 导出：A4 等宽排版，超长行自动折行，一页放不下自动翻页。 */
     private fun writePdf(context: Context, entries: List<LogEntry>, packageName: String, file: File) {
         val doc = PdfDocument()
-        val body = Paint().apply {
-            typeface = Typeface.MONOSPACE
-            textSize = 7.4f
-            isAntiAlias = true
-        }
-        val head = Paint(body).apply {
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            textSize = 8.2f
-        }
-        val pageW = 842
-        val pageH = 595
-        val margin = 22f
-        val lineH = 9.6f
-        val maxChars = ((pageW - margin * 2) / (body.textSize * 0.62f)).toInt().coerceAtLeast(60)
-
-        var pageNo = 1
-        var page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNo).create())
-        var canvas = page.canvas
-        var y = margin + 8f
-
-        fun newPage() {
-            doc.finishPage(page)
-            pageNo += 1
-            page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNo).create())
-            canvas = page.canvas
-            y = margin + 8f
-        }
-
-        canvas.drawText("LogLens  ${packageName.ifBlank { "all apps" }}  ${entries.size} entries", margin, y, head)
-        y += lineH + 2f
-        canvas.drawText(
-            "${Build.MANUFACTURER} ${Build.MODEL}  Android ${Build.VERSION.RELEASE} (${Build.ID})  " +
-                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()),
-            margin, y, body
-        )
-        y += lineH * 1.4f
-
-        val limit = entries.size.coerceAtMost(40_000)
-        for (i in 0 until limit) {
-            val e = entries[i]
-            val prefix = "${e.time} ${e.level.letter} ${e.tag}: "
-            val text = prefix + e.message.replace("\r", " ")
-            var rest = text
-            while (rest.isNotEmpty()) {
-                val cut = if (rest.length <= maxChars) rest.length else {
-                    val slice = rest.substring(0, maxChars)
-                    val brk = slice.lastIndexOf(' ')
-                    if (brk > maxChars * 0.6) brk else maxChars
-                }
-                if (y > pageH - margin) newPage()
-                canvas.drawText(rest.substring(0, cut), margin, y, body)
-                y += lineH
-                rest = rest.substring(cut).trimStart()
+        try {
+            val body = Paint().apply {
+                typeface = Typeface.MONOSPACE
+                textSize = 7.4f
+                isAntiAlias = true
             }
+            val head = Paint(body).apply {
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                textSize = 8.2f
+            }
+            val pageW = 842
+            val pageH = 595
+            val margin = 22f
+            val lineH = 9.6f
+            val maxChars = ((pageW - margin * 2) / (body.textSize * 0.62f)).toInt().coerceAtLeast(60)
+
+            var pageNo = 1
+            var page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNo).create())
+            var canvas = page.canvas
+            var y = margin + 8f
+
+            fun newPage() {
+                doc.finishPage(page)
+                pageNo += 1
+                page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNo).create())
+                canvas = page.canvas
+                y = margin + 8f
+            }
+
+            canvas.drawText("LogLens  ${packageName.ifBlank { "all apps" }}  ${entries.size} entries", margin, y, head)
+            y += lineH + 2f
+            canvas.drawText(
+                "${Build.MANUFACTURER} ${Build.MODEL}  Android ${Build.VERSION.RELEASE} (${Build.ID})  " +
+                    SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()),
+                margin, y, body
+            )
+            y += lineH * 1.4f
+
+            val limit = entries.size.coerceAtMost(40_000)
+            for (i in 0 until limit) {
+                val e = entries[i]
+                val prefix = "${e.time} ${e.level.letter} ${e.tag}: "
+                val text = prefix + e.message.replace("\r", " ")
+                var rest = text
+                while (rest.isNotEmpty()) {
+                    val cut = if (rest.length <= maxChars) rest.length else {
+                        val slice = rest.substring(0, maxChars)
+                        val brk = slice.lastIndexOf(' ')
+                        if (brk > maxChars * 0.6) brk else maxChars
+                    }
+                    if (y > pageH - margin) newPage()
+                    canvas.drawText(rest.substring(0, cut), margin, y, body)
+                    y += lineH
+                    rest = rest.substring(cut).trimStart()
+                }
+            }
+            if (entries.isEmpty()) canvas.drawText("(no entries)", margin, y, body)
+            doc.finishPage(page)
+            file.outputStream().use { doc.writeTo(it) }
+        } finally {
+            // 中途排版/写文件抛异常时也必须释放 PdfDocument 的 native 资源
+            runCatching { doc.close() }
         }
-        if (entries.isEmpty()) canvas.drawText("(no entries)", margin, y, body)
-        doc.finishPage(page)
-        file.outputStream().use { doc.writeTo(it) }
-        doc.close()
     }
 
     fun uriFor(context: Context, file: File): Uri = FileProvider.getUriForFile(

@@ -216,13 +216,21 @@ object QuerySyntax {
                     val re = compileOrThrow(value)
                     return Node { e, _ -> re.containsMatchIn(e.message) }
                 }
-                "package", "pkg", "app" -> return Node { e, env ->
-                    val name = env.procNames[e.pid] ?: return@Node false
-                    matchField(name, value, mode, if (mode == Mode.REGEX) compileOrThrow(value) else null)
+                "package", "pkg", "app" -> {
+                    // 正则必须在解析期编译：放进 eval 会逐行编译，且非法正则会以未捕获异常
+                    // 从过滤循环里抛到 Compose，直接崩界面
+                    val re = if (mode == Mode.REGEX) compileOrThrow(value) else null
+                    return Node { e, env ->
+                        val name = env.procNames[e.pid] ?: return@Node false
+                        matchField(name, value, mode, re)
+                    }
                 }
-                "process", "proc" -> return Node { e, env ->
-                    val name = env.procNames[e.pid] ?: return@Node false
-                    matchField(name, value, mode, if (mode == Mode.REGEX) compileOrThrow(value) else null)
+                "process", "proc" -> {
+                    val re = if (mode == Mode.REGEX) compileOrThrow(value) else null
+                    return Node { e, env ->
+                        val name = env.procNames[e.pid] ?: return@Node false
+                        matchField(name, value, mode, re)
+                    }
                 }
                 "pid" -> {
                     val set = splitInts(value) ?: throw ParseException("pid 需要数字")
@@ -234,6 +242,10 @@ object QuerySyntax {
                 }
                 "level", "lvl" -> {
                     val p = levelPriority(value) ?: throw ParseException("未知级别")
+                    // RAW 的 priority 是 -1，用 >= 会恒真；raw 必须按等值匹配
+                    if (value.equals("raw", true)) {
+                        return Node { e, _ -> e.level == LogLevel.RAW }
+                    }
                     return Node { e, _ -> e.level.priority >= p }
                 }
                 "is" -> {
@@ -246,6 +258,7 @@ object QuerySyntax {
                                 e.message.startsWith("at ") ||
                                 e.message.startsWith("Caused by")
                             "firebase" -> e.tag.startsWith("Firebase")
+                            "raw" -> e.level == LogLevel.RAW
                             else -> if (lvl != null) e.level.priority >= lvl else false
                         }
                     }
@@ -326,24 +339,32 @@ object QuerySyntax {
  */
 object LogTime {
 
-    private val full = Regex("""(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\.(\d{1,3})""")
+    // 年份可选：本 App 给 logcat 行补过年份（跨年日志会带 yyyy-），离线导入也可能带；
+    // 不解析年份会把去年 12 月的日志当成今年 12 月（age: 会把未来时间判成「刚刚」）
+    private val full = Regex("""(?:(\d{4})-)?(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})\.(\d{1,3})""")
     private val short = Regex("""(\d{2}):(\d{2}):(\d{2})\.(\d{1,3})""")
 
     fun millisOf(time: String): Long? {
         if (time.isBlank()) return null
-        val cal = java.util.Calendar.getInstance()
         full.find(time)?.let { m ->
-            val month = m.groupValues[1].toIntOrNull() ?: return null
-            val day = m.groupValues[2].toIntOrNull() ?: return null
-            cal.set(java.util.Calendar.MONTH, month - 1)
-            cal.set(java.util.Calendar.DAY_OF_MONTH, day)
-            cal.set(java.util.Calendar.HOUR_OF_DAY, m.groupValues[3].toInt())
-            cal.set(java.util.Calendar.MINUTE, m.groupValues[4].toInt())
-            cal.set(java.util.Calendar.SECOND, m.groupValues[5].toInt())
-            cal.set(java.util.Calendar.MILLISECOND, m.groupValues[6].padEnd(3, '0').toInt())
+            val year = m.groupValues[1].toIntOrNull() ?: java.util.Calendar.getInstance()
+                .get(java.util.Calendar.YEAR)
+            val month = m.groupValues[2].toIntOrNull() ?: return null
+            val day = m.groupValues[3].toIntOrNull() ?: return null
+            val cal = java.util.Calendar.getInstance().apply { clear() }
+            cal.set(
+                year,
+                month - 1,
+                day,
+                m.groupValues[4].toInt(),
+                m.groupValues[5].toInt(),
+                m.groupValues[6].toInt()
+            )
+            cal.set(java.util.Calendar.MILLISECOND, m.groupValues[7].padEnd(3, '0').toInt())
             return cal.timeInMillis
         }
         short.find(time)?.let { m ->
+            val cal = java.util.Calendar.getInstance()
             cal.set(java.util.Calendar.HOUR_OF_DAY, m.groupValues[1].toInt())
             cal.set(java.util.Calendar.MINUTE, m.groupValues[2].toInt())
             cal.set(java.util.Calendar.SECOND, m.groupValues[3].toInt())

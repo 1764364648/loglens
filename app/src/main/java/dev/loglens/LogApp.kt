@@ -23,14 +23,20 @@ class LogApp : Application() {
             runCatching {
                 val stamp = System.currentTimeMillis()
                 val head = "thread=${thread.name}\ntime=$stamp\n\n" + throwable.stackTraceToString()
-                val dir = java.io.File(getExternalFilesDir(null), "self_crash").apply { mkdirs() }
-                java.io.File(dir, "crash_$stamp.txt").writeText(head)
+                // 外部目录可能拿不到（存储已卸载/未挂载）：两份写入各自兜底，
+                // 外部目录失败不能挡住内部目录和 Prefs 里的崩溃记录
+                getExternalFilesDir(null)?.let { external ->
+                    runCatching {
+                        val dir = java.io.File(external, "self_crash").apply { mkdirs() }
+                        java.io.File(dir, "crash_$stamp.txt").writeText(head)
+                    }
+                }
                 runCatching {
                     java.io.File(filesDir, "self_crash").apply { mkdirs() }
                         .let { java.io.File(it, "crash_$stamp.txt").writeText(head) }
                 }
                 if (::prefs.isInitialized) {
-                    prefs.lastCrash = head.take(8000)
+                    runCatching { prefs.setLastCrashSync(head.take(8000)) }
                 }
             }
             default?.uncaughtException(thread, throwable)

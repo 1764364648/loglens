@@ -231,7 +231,11 @@ class CaptureService : Service() {
                 // 17 有 MetricStyle 就上真数据，16 只能拿 ProgressStyle 装个假进度
                 val metric = if (Build.VERSION.SDK_INT >= 37) metricStyleFor(state, paused) else null
                 builder.setStyle(metric ?: progressStyle(paused))
-                builder.setRequestPromotedOngoing(true)
+                // setRequestPromotedOngoing 是 API 36.1（Android 16 QPR1）才有的方法，
+                // 36.0 上不存在；按 SDK_INT_FULL 判断，避免在 Android 16 初版抛 NoSuchMethodError
+                if (Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1) {
+                    builder.setRequestPromotedOngoing(true)
+                }
             }
         }
         return builder.build()
@@ -245,7 +249,11 @@ class CaptureService : Service() {
     /**
      * Android 17 的 MetricStyle 模板：胶囊上直接显示结构化数值，
      * 时长走系统秒表（系统自己跳秒，不用我们每 2s 推一次），条数与崩溃数走定点整数。
+     *
+     * 仅在 [buildNotification] 的 SDK_INT >= 37 分支调用；注解用于让 lint 的 NewApi
+     * 识别这是有意使用的高版本 API（否则跨函数守卫分析会误报整段）。
      */
+    @android.annotation.TargetApi(37)
     private fun metricStyleFor(
         state: CaptureController.State,
         paused: Boolean
@@ -284,6 +292,7 @@ class CaptureService : Service() {
         return style
     }
 
+    @android.annotation.TargetApi(37)
     private fun durationValue(
         capturing: CaptureController.State.Capturing,
         paused: Boolean
@@ -315,7 +324,8 @@ class CaptureService : Service() {
         )
     }
 
-    /** ProgressStyle 是 Android 16 提升为 Promoted Ongoing 的硬性前提 */
+    /** ProgressStyle 是 Android 16 提升为 Promoted Ongoing 的硬性前提（仅 SDK_INT >= 36 调用） */
+    @android.annotation.TargetApi(36)
     private fun progressStyle(paused: Boolean): Notification.ProgressStyle {
         val style = Notification.ProgressStyle()
         style.setStyledByProgress(false)
@@ -325,7 +335,6 @@ class CaptureService : Service() {
     }
 
     private fun startForegroundCompat(notification: Notification) {
-        foregroundStarted = true
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(
                 NOTI_ID,
@@ -335,6 +344,8 @@ class CaptureService : Service() {
         } else {
             startForeground(NOTI_ID, notification)
         }
+        // 只有 startForeground 真的成功后才标记，否则 push() 会在「没进前台」时继续发通知
+        foregroundStarted = true
     }
 
     private fun stopForegroundCompat() {

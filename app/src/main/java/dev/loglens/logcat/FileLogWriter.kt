@@ -57,7 +57,10 @@ class FileLogWriter(private val context: Context) {
         seq = 0
         sinceCheck = 0
         lastRotateReason = null
-        openNext()
+        if (!openNext()) {
+            // 拿不到可写目录：不要把「以为在落盘」的状态留给上层
+            throw java.io.IOException(lastRotateReason ?: "无法创建日志文件")
+        }
         alive.set(true)
         thread = Thread({ loop() }, "log-file-writer").apply {
             isDaemon = true
@@ -65,12 +68,20 @@ class FileLogWriter(private val context: Context) {
         }
     }
 
-    private fun openNext() {
-        val d = dir ?: return
+    /** 打开下一份文件；失败返回 false（存储满 / 被卸载），由调用方决定停止写入 */
+    private fun openNext(): Boolean {
+        val d = dir ?: return false
         val f = if (seq == 0) File(d, "$baseName.log") else File(d, "$baseName.$seq.log")
         currentFile = f
-        writer = BufferedWriter(FileWriter(f, true), 64 * 1024)
+        writer = try {
+            BufferedWriter(FileWriter(f, true), 64 * 1024)
+        } catch (t: Throwable) {
+            lastRotateReason = "打开日志文件失败：${t.message ?: t.javaClass.simpleName}"
+            null
+        }
+        if (writer == null) return false
         pruneOld()
+        return true
     }
 
     /** 只保留最近 keepFiles() 份（含当前文件），超出的旧分片直接删掉 */
@@ -92,10 +103,10 @@ class FileLogWriter(private val context: Context) {
         runCatching { writer?.flush() }
         runCatching { writer?.close() }
         seq++
-        openNext()
-        // openNext 拿不到目录（存储被卸载）时不能假装继续写，置空让 enqueue 停手并留个原因
-        if (writer == null) {
-            lastRotateReason = "轮转失败：拿不到写入目录"
+        if (!openNext()) {
+            // 轮转失败（存储满 / 被卸载）：停止写线程并清掉待排队列，避免继续假装落盘
+            alive.set(false)
+            queue.clear()
             return
         }
         lastRotateReason = "单文件达到 ${limitBytes() / 1024 / 1024} MB，已切到新分片"
@@ -118,7 +129,14 @@ class FileLogWriter(private val context: Context) {
                     sinceCheck = 0
                     runCatching { writer?.flush() }
                     val size = currentFile?.length() ?: 0L
-                    if (size >= limitBytes()) rotate()
+                    if (size >= limitBytes()) {
+                        // rotate 内部已兜底 I/O 异常；这里再兜一层，绝不让写线程带着异常退出
+                        runCatching { rotate() }.onFailure {
+                            alive.set(false)
+                            queue.clear()
+                            lastRotateReason = "轮转失败：${it.message ?: it.javaClass.simpleName}"
+                        }
+                    }
                 }
             } else {
                 runCatching { writer?.flush() }

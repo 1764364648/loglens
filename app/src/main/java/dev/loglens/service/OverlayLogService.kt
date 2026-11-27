@@ -198,12 +198,11 @@ class OverlayLogService : Service() {
 
     private fun render() {
         val view = body ?: return
-        val entries = LogRepository.snapshot()
-        if (entries.isEmpty()) {
+        val tail = LogRepository.recent(14)
+        if (tail.isEmpty()) {
             view.text = "等待日志…"
             return
         }
-        val tail = entries.takeLast(14)
         view.text = tail.joinToString("\n") { line(it) }
     }
 

@@ -76,6 +76,22 @@ object LogRepository {
         ArrayList(buffer).also { it.reverse() }
     }
 
+    /**
+     * 最近 [limit] 条，按旧→新顺序返回。
+     *
+     * 注意 [snapshot] 返回的是新→旧；需要「最新 N 行」的调用方不要再用 takeLast，
+     * 否则拿到的是缓冲区里最旧的一段（悬浮窗、崩溃快照曾因此显示错误内容）。
+     */
+    fun recent(limit: Int): List<LogEntry> = synchronized(lock) {
+        if (limit <= 0 || buffer.isEmpty()) return emptyList()
+        val n = minOf(limit, buffer.size)
+        val out = ArrayList<LogEntry>(n)
+        val it = buffer.descendingIterator()
+        while (out.size < n && it.hasNext()) out.add(it.next())
+        out.reverse()
+        out
+    }
+
     fun statsSnapshot(): Stats = synchronized(lock) { Stats(totalValue, crashValue) }
 
     fun clear() {

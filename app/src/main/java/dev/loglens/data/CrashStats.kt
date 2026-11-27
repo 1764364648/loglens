@@ -125,7 +125,14 @@ object CrashStats {
         val all = load(prefs).toMutableList()
         all.addAll(pending.values)
         val now = System.currentTimeMillis()
-        val dayStart = now - (now % 86_400_000L) - java.util.TimeZone.getDefault().getOffset(now)
+        // 本地零点：不能直接用「UTC 零点 ± 时区偏移」，在 UTC+8 的凌晨 / UTC-5 的晚间会差一天
+        val dayStart = java.util.Calendar.getInstance().apply {
+            timeInMillis = now
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
         var today = 0
         var week = 0
         var total = 0

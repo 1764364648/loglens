@@ -70,7 +70,7 @@ object Forensics {
      * 用 shell 的 ls -l 解析，避免在主机侧只为了列目录就拉一次 dumpsys。
      */
     fun listServerLogs(dir: String = "/data/local/tmp"): List<Pair<String, Long>> {
-        val r = runCatching { ShellRunner.exec("ls -l $dir 2>&1", 15_000L) }.getOrNull() ?: return emptyList()
+        val r = runCatching { ShellRunner.exec("ls -l ${q(dir)} 2>&1", 15_000L) }.getOrNull() ?: return emptyList()
         if (r.code != 0) return emptyList()
         val re = Regex("^[bcdlps-][rwxsStT-]{9}\\s+\\S+\\s+\\S+\\s+\\S+\\s+(\\d+)\\s+.*?(\\S+)$")
         return r.stdout.lineSequence().mapNotNull { line ->
@@ -81,9 +81,12 @@ object Forensics {
         }.distinctBy { it.first }.sortedByDescending { it.second }.toList()
     }
 
-    fun dirOf(context: Context, pkg: String, at: Long = System.currentTimeMillis()): File =
-        File(context.getExternalFilesDir(null), "forensics/${pkg.ifBlank { "unknown" }}_${stampOf(at)}")
+    fun dirOf(context: Context, pkg: String, at: Long = System.currentTimeMillis()): File {
+        // 外部目录拿不到时退回内部 files/（FileProvider 的 files-path 覆盖得到，仍可分享）
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        return File(base, "forensics/${pkg.ifBlank { "unknown" }}_${stampOf(at)}")
             .apply { mkdirs() }
+    }
 
     private fun stampOf(at: Long): String =
         SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(at))
@@ -109,8 +112,13 @@ object Forensics {
         val steps = ArrayList<Step>()
         val started = System.currentTimeMillis()
 
-        fun step(title: String, cmd: String, timeoutMs: Long = 40_000L): Step {
-            val r = runCatching { ShellRunner.exec(cmd, timeoutMs) }
+        fun step(
+            title: String,
+            cmd: String,
+            timeoutMs: Long = 40_000L,
+            exec: String = cmd
+        ): Step {
+            val r = runCatching { ShellRunner.exec(exec, timeoutMs) }
                 .getOrElse { ShellRunner.Result(-1, "", it.message ?: it.javaClass.simpleName) }
             val sb = StringBuilder(r.stdout.trimEnd())
             if (r.stderr.isNotBlank()) {
@@ -153,10 +161,13 @@ object Forensics {
         }
 
         // 3. main buffer 按 tag 过滤（过滤下沉到 logcat，不用主机侧 grep 全量）
-        val tagsArg = tagList.joinToString(" ") { "${it}:V" }
+        // tag 来自用户输入：显示保留原样，真正执行时逐个单引号包住，避免空格/; 破坏命令
+        val tagsDisplay = tagList.joinToString(" ") { "${it}:V" }
+        val tagsArg = tagList.joinToString(" ") { q("${it}:V") }
         val main = step(
             "③ main buffer 按 tag 抽尾部 800 行",
-            "logcat -b main -d -v threadtime -t 800 -s $tagsArg 2>&1"
+            "logcat -b main -d -v threadtime -t 800 -s $tagsDisplay 2>&1",
+            exec = "logcat -b main -d -v threadtime -t 800 -s $tagsArg 2>&1"
         )
 
         // 4. server 日志尾部（限 2 万行，避免几十万行灌进 binder 管道）
@@ -249,7 +260,7 @@ object Forensics {
             )
             File(dir, "main_filtered.log").writeText(
                 buildString {
-                    appendLine("# main buffer 按 tag 过滤　tags：$tagsArg")
+                    appendLine("# main buffer 按 tag 过滤　tags：$tagsDisplay")
                     appendLine("# 命令：${main.cmd}")
                     appendLine("#".repeat(72))
                     appendLine(main.out)
@@ -270,7 +281,7 @@ object Forensics {
             appendLine("设备：${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("ROM：${Build.DISPLAY}")
             appendLine("日志路径：$path")
-            appendLine("tags：$tagsArg")
+            appendLine("tags：$tagsDisplay")
             appendLine()
             appendLine("── 结论 ──")
             appendLine(verdict)
