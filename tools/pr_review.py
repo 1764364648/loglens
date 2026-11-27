@@ -26,6 +26,12 @@ LABEL_BAD = "pr-review: 建议关闭（待决定）"
 LABELS = (LABEL_OK, LABEL_MID, LABEL_BAD)
 
 DEFAULT_BASE = "https://ark.cn-beijing.volces.com/api/v3"
+# 免费路线：GitHub 自带的 Models 网关，用工作流里的 GITHUB_TOKEN 就行（需要 models: read 权限）。
+GITHUB_MODELS_BASE = "https://models.github.ai/inference"
+MODELS_CANDIDATES = ["openai/gpt-4o-mini", "openai/gpt-4.1-mini"]
+# 免费额度单次输入只有 8k token 左右，所以给模型的 diff 预算要缩小。
+ECO_FILE_CHARS = 5000
+ECO_TOTAL_CHARS = 16000
 SKIP_EXT = {
     ".jar", ".aar", ".apk", ".aab", ".dex", ".so", ".dll", ".exe", ".bin",
     ".class", ".jks", ".keystore", ".p12", ".pfx", ".zip", ".7z", ".rar",
@@ -210,11 +216,16 @@ def collect_diff(files, max_file=MAX_FILE_CHARS, max_total=MAX_TOTAL_CHARS):
     return "\n\n".join(blocks), kept, skipped
 
 
-def build_user_prompt(meta, files, commits, note):
+def build_user_prompt(meta, files, commits, note, eco=False):
     body = (meta.get("body") or "").strip()
-    body = "（空）" if not body else body[:2000]
-    commit_lines = [f"- {c['sha'][:7]} {c['commit']['message'].splitlines()[0][:120]}" for c in commits[:12]]
-    diff, kept, skipped = collect_diff(files)
+    body = "（空）" if not body else body[:1200 if eco else 2000]
+    commit_lines = [f"- {c['sha'][:7]} {c['commit']['message'].splitlines()[0][:120]}" for c in commits[:8 if eco else 12]]
+    diff, kept, skipped = collect_diff(
+        files,
+        ECO_FILE_CHARS if eco else MAX_FILE_CHARS,
+        ECO_TOTAL_CHARS if eco else MAX_TOTAL_CHARS,
+    )
+    budget = "（输入预算很紧：只报最关键的 5 条问题，句子尽量短，不要复述 diff。）" if eco else ""
     return USER_TMPL.format(
         repo=meta["_repo"], num=meta["number"], author=meta["user"]["login"],
         age=meta.get("_author_age", "未知"), title=meta["title"], body=body,
@@ -222,14 +233,14 @@ def build_user_prompt(meta, files, commits, note):
         commit_list="\n".join(commit_lines) or "-（无）",
         changed=meta.get("changed_files", len(files)), add=meta.get("additions", 0),
         del_=meta.get("deletions", 0), diff=diff,
-        audit_note=note,
+        audit_note=(note + " " + budget).strip(),
     ), kept, skipped
 
 
 # ---------------------------------------------------------------- 模型
-def call_model(base, key, model, messages, timeout=150):
+def call_model(base, key, model, messages, timeout=150, max_tokens=2400):
     url = base.rstrip("/") + "/chat/completions"
-    payload = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 2400}
+    payload = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": max_tokens}
     data = json.dumps(payload).encode()
     last = None
     for attempt in range(2):
@@ -390,10 +401,24 @@ def render(meta, rev, kept, skipped, model):
 
 
 # ---------------------------------------------------------------- 主流程
+def resolve_provider(api_key, base, model, gh):
+    """决定这次用哪个网关。没给密钥就用 GitHub Models（GITHUB_TOKEN，免费额度）。"""
+    on_models = False
+    if not api_key:
+        if base and "models.github.ai" not in base:
+            return None, "", "", False        # 指了外部服务却没密钥，跳过
+        api_key, base, on_models = gh, (base or GITHUB_MODELS_BASE), True
+        model = model or MODELS_CANDIDATES[0]
+    return api_key, base, model, on_models
+
+
 def run(args):
-    key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    base = os.environ.get("LLM_BASE_URL") or DEFAULT_BASE
-    model = os.environ.get("LLM_MODEL") or ""
+    key, base, model, on_models = resolve_provider(
+        os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
+        os.environ.get("LLM_BASE_URL") or "",
+        os.environ.get("LLM_MODEL") or "",
+        token(),
+    )
     gh = token()
 
     if args.stub:
@@ -406,10 +431,10 @@ def run(args):
         print(body)
         return 0
 
-    if not (key and model):
-        msg = ("AI 评审未启用：缺少 LLM_API_KEY 或 LLM_MODEL。"
-               "在仓库 Settings → Secrets and variables → Actions 里配 LLM_API_KEY（secret）、"
-               "LLM_MODEL 与 LLM_BASE_URL（variables）后，这条会自动生效。")
+    if not (key and base and model):
+        msg = ("AI 评审未启用：没有可用的模型网关。默认走 GitHub 自带的免费 Models 网关"
+               "（工作流给 models: read 权限、用 GITHUB_TOKEN），也可以配 LLM_API_KEY + "
+               "LLM_BASE_URL + LLM_MODEL 换成自己的模型。当前两者都不可用。")
         print(msg)
         if args.summary_file:
             open(args.summary_file, "w", encoding="utf-8").write("<!-- pr-review -->\n" + msg + "\n")
@@ -447,12 +472,25 @@ def run(args):
             return 0
         note = "规则闸门 pr-audit 已通过。" if v == "ok" else "规则闸门结论未取到（可能还在跑）。"
 
-    user, kept, skipped = build_user_prompt(meta, files, commits, note)
+    eco = on_models or ("models.github.ai" in base)
+    user, kept, skipped = build_user_prompt(meta, files, commits, note, eco=eco)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
-    try:
-        raw = call_model(base, key, model, messages)
-    except Exception as e:
-        msg = f"AI 评审这次没跑成（{clean(e, 200)}）。结论以规则闸门和人工review为准。"
+    candidates = [model] if not on_models else ([model] + [m for m in MODELS_CANDIDATES if m != model])
+    raw, used, last_err = None, model, None
+    for cand in candidates:
+        try:
+            raw = call_model(base, key, cand, messages, max_tokens=900 if eco else 2400)
+            used = cand
+            break
+        except Exception as e:
+            last_err = e
+            print(f"模型 {cand} 调用失败：{type(e).__name__} {clean(e, 160)}", file=sys.stderr)
+    if raw is None:
+        hint = ""
+        txt = clean(last_err, 200)
+        if "401" in txt or "403" in txt:
+            hint = "（多半是工作流没给 models: read 权限，或密钥没配好）"
+        msg = f"AI 评审这次没跑成：{txt}{hint}。结论以规则闸门和人工 review 为准。"
         print(msg, file=sys.stderr)
         if args.summary_file:
             open(args.summary_file, "w", encoding="utf-8").write("<!-- pr-review -->\n" + msg + "\n")
@@ -466,7 +504,8 @@ def run(args):
                 "<!-- pr-review -->\n模型输出无法解析，本轮跳过。\n")
         return 0
 
-    body = render(meta, rev, kept, skipped, model)
+    label = used + ("（GitHub Models 免费额度）" if on_models else "")
+    body = render(meta, rev, kept, skipped, label)
     print(body)
     if args.summary_file:
         open(args.summary_file, "w", encoding="utf-8").write("<!-- pr-review -->\n" + body + "\n")
@@ -518,6 +557,16 @@ def selftest():
     diff, kept, skipped = collect_diff(big)
     check("总量受限", len(diff) <= MAX_TOTAL_CHARS + 5000)
     check("并非全收", kept < 10)
+
+    k, b, m, onm = resolve_provider("sk-x", "", "my-model", "gh-token")
+    check("有密钥用自建网关", k == "sk-x" and m == "my-model" and onm is False)
+    k, b, m, onm = resolve_provider("", "", "", "gh-token")
+    check("无密钥回落 GitHub Models", onm is True and b == GITHUB_MODELS_BASE and k == "gh-token")
+    check("无密钥给默认模型", m == MODELS_CANDIDATES[0])
+    k, b, m, onm = resolve_provider("", "https://api.openai.com/v1", "", "gh-token")
+    check("外部网关无密钥则跳过（不外发令牌）", k is None and b == "")
+    check("免费额度预算更小", ECO_TOTAL_CHARS < MAX_TOTAL_CHARS)
+
     one, _, _ = collect_diff([{"filename": "big.kt", "patch": "+" + "x" * 30000}], max_file=20000)
     check("单个文件被截断", "已截断" in one)
 
@@ -564,6 +613,7 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
 
 
