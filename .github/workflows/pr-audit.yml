@@ -42,8 +42,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set +e
-          python3 .audit/pr_audit.py --pr "$PR" --repo "$REPO" --summary-file audit.md > /dev/null 2> audit.err
+          python3 .audit/pr_audit.py --pr "$PR" --repo "$REPO" --summary-file audit.md
           code=$?
-          cat audit.err >&2 || true
           { echo "<!-- pr-audit -->"; cat audit.md; } >> "$GITHUB_STEP_SUMMARY"
           exit $code

@@ -158,6 +158,17 @@ App 内还提供了一份逐条摊开的说明：**设置 → 关于 → 隐私�
 
 **没有自动发布，也没有 CI 拿签名密钥跑构建。** 安装包只在维护者本机用固定 keystore 编出来、手工上传。别人提的 PR 只看源码，永远不会变成你手机上那个包——顺带说一句，任何 PR 附带的 APK 都不予采用。
 
+**合并前有一道机器闸门。** 每个 PR 都会跑 `pr-audit`：它只读 diff 文本、不执行 PR 里的代码，盯的是这个项目不该出现的东西——联网能力、新权限、白名单外的依赖、新仓库源、二进制文件、动构建脚本 / 签名 / wrapper / 依赖校验清单、大段 Base64。命中就直接红，而 `pr-audit` 是 `main` 的必需检查，红着的时候合并按钮点不动。所以就算审的时候看走眼，带毒 PR 也进不来。
+
+想先在本地看一遍也行（不用等 CI）：
+
+```bash
+python tools/pr_audit.py --pr 12              # 查线上 PR
+python tools/pr_audit.py --range origin/main..HEAD   # 查自己还没推的分支
+```
+
+加依赖的流程是「先改 `security/dependency-allowlist.txt`，再重新生成校验清单」，两处都会出现在 diff 里，藏不住。
+
 `main` 分支受保护：要开 PR、要审查通过、禁止强推；`.github/CODEOWNERS` 把所有路径指向维护者，等于绕不过审查。漏洞请走私密报告，别开公开 Issue，细节见 [SECURITY.md](SECURITY.md)。
 
 ## 许可
