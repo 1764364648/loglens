@@ -91,6 +91,8 @@ LogLens 走的是第四条：Shizuku 已经把 shell 身份给你了（Android 1
 3. 打开 LogLens，按首页引导在 Shizuku 里给它授权
 4. 选目标应用 → 点开始捕获 → 回桌面看胶囊，或留在日志页看日志
 
+> Shizuku 用 root 启动（`su`）也能用，那种情况下它的 server 是 uid 0，转给 App 的命令就是 root 权限。LogLens 不利用这一点：它只请求 shell 身份、只发 `logcat`、`dumpsys package`、`pidof`、读 `/proc` 这几类命令，shell 干得动就够，root 换不来新功能，反而等于把 root 借给所有获授权的 App。所以「必须 root」不是本工具的要求；有 root 就把 Shizuku root 起，只是省得重新连电脑。
+
 > 这是个人自用工具，侧载安装，不上架应用商店。release 走 R8 混淆，崩溃堆栈用构建时生成的 `mapping.txt` 还原。
 
 ## 构建
