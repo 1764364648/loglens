@@ -16,13 +16,15 @@ import java.util.Locale
  *  2. 进程表 + 进程启动时间（/proc/<pid>/stat 第 22 字段 + /proc/uptime）—— 判断「跑的是不是新进程」
  *  3. ApplicationExitInfo（dumpsys activity exit-info）—— 137（128+SIGKILL）的创建到失效时间轴
  *  4. events buffer 时间轴（am_proc_start / am_kill / am_proc_died / am_anr）—— 进程生命周期与被谁杀
+ *  4b. ANR 原文（bugreportz → zip 里的 FS/data/anr/anr_*，按 Cmd line 归到目标包）
  *  5. crash buffer 现场（native crash / FATAL / tombstone 头部）
  *  5b. dropbox 崩溃存档（dumpsys dropbox --print data_app_crash / data_app_anr 等）—— logcat 滚掉后仍在
  *  6. binder 相关告警聚类 + dumpsys binder_calls_stats（shell 视角）
  *  7. 应用私有目录（/sdcard/Android/data/<pkg> 与 run-as 内部 files/、cache/）—— 找 server 端 logToFile 落点
  *
  * 明确拿不到：server 进程的标准输出（app_process 启动且未重定向时只有运行中 logcat 可见）、
- * 需要 root 的内核节点（binder 内核级统计细节、tombstone 全量内容）。
+ * 需要 root 的内核节点（binder 内核级统计细节）、/data/anr 与 /data/system/procexitstore 的直接读取
+ * （两者 shell 都是 Permission denied；ANR 原文只能绕 bugreport，native tombstone 原文同理）。
  */
 object DiagRepo {
 
@@ -271,6 +273,72 @@ object DiagRepo {
         "am_kill", "am_proc_died" -> 2
         "am_anr", "am_crash", "am_low_memory" -> 3
         else -> 0
+    }
+
+    // ───────────────────────── 4b. ANR 原文（bugreport） ─────────────────────────
+
+    /**
+     * 一次 bugreportz 的产物。原文不在 /data/anr 里给 shell 读，但 dumpstate 以 root 收集后会把它
+     * 打进 zip 的 `FS/data/anr/anr_*`，shell 身份能 unzip -p 出来。
+     */
+    data class AnrTrace(
+        val zip: String,
+        val blocks: List<String>,
+        val scanned: Int,
+        val tombstones: Int,
+        val note: String
+    )
+
+    fun anrTraceDump(pkg: String, maxBytes: Int = 4_000_000): AnrTrace {
+        val gen = ShellRunner.exec("bugreportz 2>&1 | tail -n 3", 300_000)
+        val out = (gen.stdout + gen.stderr).trim()
+        val zip = Regex("OK:([^\\s]+?\\.zip)").find(out)?.groupValues?.get(1)?.trim()
+            ?: return AnrTrace("", emptyList(), 0, 0, "bugreportz 没给出 zip 路径：\n" + out.take(600))
+
+        val list = ShellRunner.exec(
+            "unzip -l '$zip' 2>&1 | grep -E 'FS/data/anr/|FS/data/tombstones/' | head -n 80", 30_000
+        )
+        val tomb = (list.stdout + list.stderr).lineSequence().count { it.contains("FS/data/tombstones/") }
+
+        // 只解 anr_*（ANR 真正的线程 dump）；trace_NN 是 tombstoned 抓的别的快照，不算 ANR 原文
+        val raw = ShellRunner.exec("unzip -p '$zip' 'FS/data/anr/anr_*' 2>/dev/null | head -c $maxBytes", 90_000)
+        val text = raw.stdout
+        if (text.isBlank()) {
+            return AnrTrace(zip, emptyList(), 0, tomb, "包里的 FS/data/anr 没有 anr_* 条目（这台机器可能没开 ANR dump）")
+        }
+        val blocks = splitAnrBlocks(text)
+        val hits = blocks.filter { b ->
+            val cmd = Regex("(?m)^Cmd line: (\\S+)").find(b)?.groupValues?.get(1)
+            cmd == pkg || cmd?.startsWith("$pkg:") == true
+        }.takeLast(6).map { it.take(300_000) }
+        val note = when {
+            blocks.isEmpty() -> "解出来的文本里没有 ----- pid 段落"
+            hits.isEmpty() -> "包内 ${blocks.size} 段线程快照，没有 Cmd line 是 $pkg 的那一段"
+            else -> "包内 ${blocks.size} 段线程快照，其中 ${hits.size} 段属于 $pkg"
+        }
+        return AnrTrace(zip, hits, blocks.size, tomb, note)
+    }
+
+    /** 每段以 `----- pid <n> at <time> -----` 开头，第二行是 `Cmd line:` */
+    private fun splitAnrBlocks(text: String): List<String> {
+        val out = ArrayList<String>()
+        val cur = StringBuilder()
+        text.lineSequence().forEach { line ->
+            if (line.startsWith("----- pid ")) {
+                if (cur.isNotEmpty()) out.add(cur.toString())
+                cur.setLength(0)
+            }
+            if (cur.isNotEmpty() || line.startsWith("----- pid ")) cur.append(line).append('\n')
+        }
+        if (cur.isNotEmpty()) out.add(cur.toString())
+        return out
+    }
+
+    /** 只删我们自己刚从 bugreportz 生成的那个包，不碰用户自己的 bug report */
+    fun deleteBugreport(zip: String) {
+        if (zip.startsWith("/data/user_de/0/com.android.shell/files/bugreports/") && zip.endsWith(".zip")) {
+            ShellRunner.exec("rm -f '$zip'", 10_000)
+        }
     }
 
     // ───────────────────────── 5. crash 现场 ─────────────────────────

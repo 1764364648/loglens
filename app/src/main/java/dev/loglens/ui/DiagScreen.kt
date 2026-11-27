@@ -240,6 +240,8 @@ fun DiagScreen(
     var reload by remember { mutableStateOf(0) }
     var globalMode by remember { mutableStateOf(prefs.globalMode) }
     var preview by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    var traceBusy by remember { mutableStateOf(false) }
+    var trace by remember { mutableStateOf<DiagRepo.AnrTrace?>(null) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(pkg, reload) {
@@ -473,13 +475,57 @@ fun DiagScreen(
                             appendLine("通道情况：")
                             append(why)
                         }
+                        appendLine()
+                        appendLine()
+                        append("归因只说「哪类 ANR」。要看卡在哪个函数，点下面「抓 ANR 原文」：跑一次 bugreportz（约 1 分钟、生成几十 MB 的包），只解 FS/data/anr 里 Cmd line 是本包的那几段线程栈。")
                     }
                 }
                 DiagCard(
                     "4. ANR 归因（AnrInfo）",
                     body,
                     if (anr?.items?.isNotEmpty() == true) palette.error else palette.verbose
-                )
+                ) {
+                    TextButton(
+                        enabled = !traceBusy,
+                        onClick = {
+                            scope.launch {
+                                traceBusy = true
+                                val r = withContext(Dispatchers.IO) {
+                                    runCatching { DiagRepo.anrTraceDump(pkg) }.getOrNull()
+                                }
+                                traceBusy = false
+                                trace = r
+                                preview = if (r == null) {
+                                    Triple("ANR 原文", "bugreport 没跑成功，先确认 Shizuku 还在、shell 通道没断。", "")
+                                } else {
+                                    Triple(
+                                        "ANR 原文（bugreport）",
+                                        buildString {
+                                            appendLine(r.note)
+                                            appendLine("zip：${r.zip}")
+                                            appendLine("包里另有 ${r.tombstones} 个 tombstone（native 崩溃原文）")
+                                            if (r.blocks.isNotEmpty()) {
+                                                appendLine()
+                                                append(r.blocks.joinToString("\n\n"))
+                                            }
+                                        },
+                                        ""
+                                    )
+                                }
+                            }
+                        }
+                    ) {
+                        Text(if (traceBusy) "取原文中… 约 1 分钟" else "抓 ANR 原文")
+                    }
+                    trace?.zip?.takeIf { it.isNotEmpty() }?.let { zip ->
+                        TextButton(onClick = {
+                            scope.launch {
+                                withContext(Dispatchers.IO) { DiagRepo.deleteBugreport(zip) }
+                                trace = null
+                            }
+                        }) { Text("删掉这个包") }
+                    }
+                }
             }
 
             // ── 5. 进程事件时间轴 ─────────────────────

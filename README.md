@@ -59,7 +59,7 @@ LogLens 走的是第四条：Shizuku 已经把 shell 身份给你了（Android 1
 
 - **崩溃归集**：以崩溃为线索把相关行收拢成一组，堆栈自动折叠
 - **问题体检**：把常见病因（权限、137 退出、binder 死、通道受限）直接点名
-- **深度诊断（十个分区）**：应用档案、进程是否生效、137 退出、ANR、events、native crash、dropbox 崩溃存档、binder、私有目录、全量 logcat
+- **深度诊断（十个分区）**：应用档案、进程是否生效、137 退出、ANR、events、native crash、dropbox 崩溃存档、binder、私有目录、全量 logcat；ANR 卡上能再抓一次 bugreport，把 `FS/data/anr` 里属于目标包的线程栈原文解出来
 - **取证包**：服务落盘日志的路径与 tag、四步流水、结论三态（已命中问题特征 / 待核 / 本次未命中）、FileProvider 产物——最后给你一个能发给别人的包，而不是一堆原始行；不知道日志文件叫什么，进页面点一下就能列目录选
 
 ### 4. 网络问题也有自己的页，而且不用装 CA
@@ -78,7 +78,7 @@ LogLens 走的是第四条：Shizuku 已经把 shell 身份给你了（Android 1
 | 日志页 | 关键字 / 正则搜索、tag 包含与排除、只看崩溃、书签、级别计数、折叠堆栈、折叠刷屏、markText 高亮、紧凑行、小地图、暂停跟随、悬浮窗、离线导入、日志通道受限引导、崩溃归集、问题体检 |
 | 网络快照 | 目标应用或整机；时间轴录制；五格统计；按应用分组；SYN_SENT > 3s 判连接失败；已消失连接保留 90s |
 | 工具箱 | 深度诊断、取证包、网络快照、问题反馈（导出 LogLens 自己的运行日志） |
-| 深度诊断 | 十个分区：应用档案 / 进程是否生效 / 137 退出 / ANR / events / native crash / dropbox 崩溃存档 / binder / 私有目录 / 全量 logcat |
+| 深度诊断 | 十个分区：应用档案 / 进程是否生效 / 137 退出 / ANR / events / native crash / dropbox 崩溃存档 / binder / 私有目录 / 全量 logcat；ANR 卡可抓 bugreport 原文 |
 | 取证包 | 读服务自己写的日志文件 + 按 tag 拉 logcat 尾部，走「探测 → 关键句抽取 → 尾部导出 → 分享」，给出结论三态（已命中问题特征 / 待核 / 本次未命中）；不确定文件在哪可一键列目录选文件 |
 | 设置 | 采集行为、日志显示（字号 9–20 / 最大行数 / 小地图 / 常亮）、存储（单文件上限 / 保留份数）、关于 |
 
@@ -133,7 +133,7 @@ keyPassword=******
 - 必须有 Shizuku 在跑；Shizuku 被系统杀掉、**或手机重启之后**，采集会断流，要重新激活一次：Android 11+ 走无线调试，Android 8–10 重新连电脑走 USB ADB（root 或常驻 adb 环境除外）。这是 Shizuku 非 root 模式的固有前提，不是本工具的门槛
 - 部分 ROM（荣耀 / 华为）默认关掉 AP 日志，需要拨号盘工程码打开，App 内会给出引导
 - 深度诊断里「应用私有目录」的内部 `files/`、`cache/` 要靠 `run-as` 读，目标 App 不是 debuggable 时只能看到 `/sdcard/Android/data/<pkg>` 那一层
-- 崩溃存档读的是系统 dropbox（`dumpsys dropbox --print`），能拿到 Java 崩溃、native 崩溃、ANR 的文本存档，**不需要 root**，logcat 滚掉之后仍然在。但原文不在这一层：`/data/anr`、`/data/tombstones`、`/data/system/procexitstore/*.gz` 这三处 shell 直接读都被拒（实测 Permission denied，走 `ApplicationExitInfo.getTraceInputStream()` 也只对进程自己的 uid 放行，shell 拿到的是 null）。要原文只有两条路：`bugreport`——dumpstate 以 root 身份收集，zip 里直接带 `FS/data/anr/*` 与 `FS/data/tombstones/*`；或者 root。
+- 崩溃存档读的是系统 dropbox（`dumpsys dropbox --print`），能拿到 Java 崩溃、native 崩溃、ANR 的文本存档，**不需要 root**，logcat 滚掉之后仍然在。但原文不在这一层：`/data/anr`、`/data/tombstones`、`/data/system/procexitstore/*.gz` 这三处 shell 直接读都被拒（实测 Permission denied，走 `ApplicationExitInfo.getTraceInputStream()` 也只对进程自己的 uid 放行，shell 拿到的是 null）。要原文只有两条路：`bugreport`——dumpstate 以 root 身份收集，zip 里直接带 `FS/data/anr/*` 与 `FS/data/tombstones/*`；或者 root。本工具走第一条：ANR 卡上的「抓 ANR 原文」跑一次 `bugreportz`（约 1 分钟、几十 MB 的包），从 `FS/data/anr/anr_*` 里按 `Cmd line:` 把目标包（含 `:子进程`）的线程栈原文解出来；包留在 shell 的 bugreports 目录，页面上可一键删。
 - 不做完整抓包：VpnService + 自签 CA 必然撞 pinning，所以网络页只做连接快照
 - 暂停期间不抓日志，这段不会补回来——暂停就是"先不看了"；页面上的"暂停跟随"是另一件事，只控制列表滚不滚
 
