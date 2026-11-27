@@ -46,7 +46,7 @@ jobs:
           print(f"pr_review.py 取自 {sha} {data['sha'][:12]}")
           PY
 
-      - name: 评审脚本自测（63 条，防止渲染、去重、预算取样、严重度分组、CI 结论与模型轮换逻辑被改坏）
+      - name: 评审脚本自测（70 条，防止渲染、去重、预算取样、严重度分组、反馈解析、CI 结论与模型轮换逻辑被改坏）
         run: python3 .review/pr_review.py --selftest
 
       - name: 评审并留言

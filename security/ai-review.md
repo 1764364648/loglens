@@ -15,11 +15,11 @@
 工作流 `.github/workflows/pr-review.yml`，`pull_request_target` 触发（`opened` / `synchronize` / `reopened` / `ready_for_review`），草稿不跑。
 
 1. 先从**基线提交**取 `tools/pr_review.py`，PR 里改这个文件对本次评审没影响。
-2. 跑一遍 63 条自测（渲染、去重标记转义、预算取样（每文件保底 / hunk 切分 / 源码优先回填 / 覆盖记账）、严重度分组、评审负担归一、标签映射、CI 结论判定、模型队列轮换），脚本被改坏会先在这里红。
+2. 跑一遍 70 条自测（渲染、去重标记转义、预算取样（每文件保底 / hunk 切分 / 源码优先回填 / 覆盖记账）、严重度分组、评审负担归一、改动归组、反馈解析、标签映射、CI 结论判定、模型队列轮换），脚本被改坏会先在这里红。
 3. 等 `pr-audit` 的结论最多 90 秒：闸门没过就只写一行“先修阻断项”，不做 AI 评审，省 token。
 4. 顺便读同一次 push 上的**构建检查**（`文档引用`、`编译 + 单测`，后者含 assemble + 单测 + lint）：构建失败就只写一行“等 CI 绿了再评”，不拿 diff 文本硬猜“能不能编译”；构建还在跑则照常评审，但在提示词里写明“本轮结论不含编译结果”。
 5. 取 PR 标题/描述/提交/文件列表/diff（二进制、锁文件、超大文件跳过，单文件 2 万字符、总量 11 万字符封顶），交给模型。
-6. 把模型输出的 JSON 渲染成一条评论：结论、判断依据、改动范围、建议动作、评审负担（轻读 / 正常 / 细看）与问题表（高 / 中在前，低折叠）、安全疑点、要作者回答的问题。
+6. 把模型输出的 JSON 渲染成一条评论：结论、判断依据、改动范围、改动分布（按路径归组）、建议动作、评审负担（轻读 / 正常 / 细看）与问题表（高 / 中在前，低折叠，每行带 `#` 序号供反馈引用）、安全疑点、要作者回答的问题。
 7. 按结论打标签：`pr-review: 合理` / `pr-review: 存疑` / `pr-review: 建议关闭（待决定）`，另一个自动摘掉。
 8. 同一条评论靠 `<!-- pr-review -->` 去重，force-push 只更新不刷屏。
 
@@ -34,6 +34,20 @@
 唯一存在的「分」都是路由信息：Meta 的 Diff Risk Score 用来决定这个 diff 要不要跳过人工评审，CodeRabbit 的 estimated review effort 告诉人这块该花多久看。它们都回答「该怎么处理这次改动」，不回答「这次改动值几分」。
 
 所以这条评论里的 `load`（轻读 / 正常 / 细看）也是同一口径：**给人排优先级用，不是质量评分，不作为放行依据**。问题表按严重度从高到低排，低级项折叠，先把噪声压下去。
+
+## 评论区就是数据源：useful / noise
+
+字节 BitsAI-CR 把 **Outdated Rate**（评论过时率，即作者是否真的改掉）当核心指标，18 周把精准率从 25% 提到 75%；阿里云效直接在行内评论上放了「采纳 / 误报」按钮。这里用最简单的等价做法：
+
+- 整体有用：回复 `useful`；
+- 某条是误报：回复 `noise 2,5`，数字就是问题表里的 `#` 列；
+- `python tools/pr_review.py --pr N --repo owner/name --stats` 读评论算误报率，**不调模型、不花钱**。
+
+统计的分界线用 `updated_at` 而不是 `created_at`：每次 push 都是 PATCH 同一条评论，`created_at` 停在第一轮，用它会把这之前的反馈也算进新一轮，把误报率稀释掉。
+
+## 改动分布
+
+按文件路径把改动归到模块（`capture` / `logcat` / `ui` / `tools` / `docs` …），跨 2 个以上模块时加一句「注意接口两端」。它只说明改动落在哪些目录，**不代表调用关系**——要真画调用图得读代码，评审机器人只看 diff，不假装知道。
 
 ## 它不构成 approve
 
@@ -112,6 +126,7 @@ python tools/pr_review.py --selftest                    # 离线自测
 python tools/pr_review.py --pr 12 --repo owner/name      # 只打印评论，不发
 python tools/pr_review.py --pr 12 --repo owner/name --comment
 python tools/pr_review.py --stub verdict.json --repo owner/name --pr 1   # 用本地 JSON 调渲染
+python tools/pr_review.py --pr 12 --repo owner/name --stats              # 误报率统计（只读评论）
 ```
 
 环境变量同上（`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`）。

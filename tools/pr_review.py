@@ -619,14 +619,52 @@ def clean(text, limit=600):
 LABEL_OF = {"合理": LABEL_OK, "存疑": LABEL_MID, "不合理": LABEL_BAD}
 
 
-def issue_table(items):
-    lines = ["| 严重度 | 位置 | 问题 | 建议 |", "| --- | --- | --- | --- |"]
-    for it in items:
+def module_of(path):
+    """把文件路径归到一个粗粒度模块，只用于「改动分布」；它不代表真实的调用关系。"""
+    p = str(path or "").replace("\\", "/").strip("/")
+    parts = p.split("/")
+    if "loglens" in parts:
+        i = parts.index("loglens")
+        if i + 1 < len(parts) - 1:
+            return parts[i + 1]
+        return "根"
+    if len(parts) >= 4 and parts[0] == "app" and parts[1] == "src":
+        return "test" if ("test" in parts or "androidTest" in parts) else "资源"
+    return parts[0] if len(parts) > 1 else "根"
+
+
+def change_map(files):
+    mods = {}
+    for f in files or []:
+        name = f.get("filename") if isinstance(f, dict) else f
+        name = str(name or "")
+        if not name:
+            continue
+        mods.setdefault(module_of(name), []).append(name.rsplit("/", 1)[-1])
+    return mods
+
+
+def render_change_map(files):
+    mods = change_map(files)
+    if not mods:
+        return ""
+    bits = []
+    for mod, names in sorted(mods.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        shown = "、".join(names[:4]) + ("…" if len(names) > 4 else "")
+        bits.append(f"{mod} {len(names)} 个文件（{shown}）")
+    tail = f"，跨 {len(mods)} 个模块，注意接口两端" if len(mods) >= 2 else ""
+    return f"**改动分布**（按路径归组，不代表调用关系）：{'；'.join(bits)}{tail}。"
+
+
+def issue_table(items, start=1):
+    lines = ["| # | 严重度 | 位置 | 问题 | 建议 |",
+             "| --- | --- | --- | --- | --- |"]
+    for n, it in enumerate(items, start):
         sev = sev_key(it.get("severity"))
         where = clean(it.get("where", ""), 80).replace("|", "\\|")
         what = clean(it.get("what", ""), 260).replace("|", "\\|").replace("\n", " ")
         fix = clean(it.get("fix", ""), 260).replace("|", "\\|").replace("\n", " ")
-        lines.append(f"| {sev} | `{where}` | {what} | {fix} |")
+        lines.append(f"| {n} | {sev} | `{where}` | {what} | {fix} |")
     return lines
 
 
@@ -640,6 +678,10 @@ def render(meta, rev, kept, skipped, model):
     out.append("")
     if rev["scope"]:
         out.append(f"**改动范围**：{clean(rev['scope'], 500)}")
+        out.append("")
+    dist = render_change_map(meta.get("_files_list"))
+    if dist:
+        out.append(dist)
         out.append("")
     out.append(f"**建议动作**：{clean(action, 60)}")
     out.append("")
@@ -672,12 +714,12 @@ def render(meta, rev, kept, skipped, model):
             out.append("")
             main = groups["高"] + groups["中"]
             if main:
-                out += issue_table(main)
+                out += issue_table(main, 1)
                 out.append("")
             if groups["低"]:
                 out.append(f"<details><summary>低优先级 {len(groups['低'])} 条（点开看）</summary>")
                 out.append("")
-                out += issue_table(groups["低"])
+                out += issue_table(groups["低"], len(main) + 1)
                 out.append("")
                 out.append("</details>")
                 out.append("")
@@ -692,6 +734,11 @@ def render(meta, rev, kept, skipped, model):
         out += [f"- {clean(q, 300)}" for q in rev["questions"]]
         out.append("")
 
+    if rev["issues"]:
+        out.append("<sub>这条有用就回 `useful`；哪条是误报就回 `noise 2,5`（数字是上面的序号）。"
+                   "`--stats` 会按严重度算命中率。</sub>")
+        out.append("")
+
     total_files = meta.get("_files", kept) or kept
     clip = meta.get("_clip", 0) or 0
     out.append(f"<sub>建议性意见，不代替人工判断，也不构成放行依据；机器人不会合并、不会关闭、不会批准。"
@@ -699,6 +746,72 @@ def render(meta, rev, kept, skipped, model):
                f"其中 {clip} 个只给了节选。没展开的部分不等于没问题。"
                f"规则闸门 pr-audit 的结论另有一条。</sub>")
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------- 反馈统计
+def parse_issue_rows(body):
+    """从渲染过的评论里取回 {序号: 严重度}，序号就是评论表格里的 # 列。"""
+    rows = {}
+    for line in str(body or "").splitlines():
+        m = re.match(r"\|\s*(\d+)\s*\|\s*(高|中|低)\s*\|", line)
+        if m:
+            rows[int(m.group(1))] = m.group(2)
+    return rows
+
+
+def parse_feedback(texts):
+    """人类回复：`useful` 记一次有用；`noise 2,5` 把这两条记为误报。"""
+    useful, noise = 0, set()
+    for t in texts or []:
+        for line in str(t or "").splitlines():
+            s = line.strip().lower()
+            if re.match(r"^(useful|有用)$", s):
+                useful += 1
+                continue
+            m = re.match(r"^noise\s*[:：]?\s*([\d,，、\s]*)$", s)
+            if m:
+                noise.update(int(n) for n in re.findall(r"\d+", m.group(1)))
+    return useful, noise
+
+
+def run_stats(repo, pr, tok):
+    """只看最近一次评审（序号以它为准），统计它之后的人类回复。
+
+    分界线用 updated_at 而不是 created_at：每次 push 都是 PATCH 同一条评论，
+    created_at 还停在第一轮，用它会把这之前的反馈也算进新的一轮，误报率被稀释。
+    """
+    comments = pr_comments(pr, repo, tok)
+    reviews = [c for c in comments if MARKER in (c.get("body") or "")]
+    if not reviews:
+        print(f"PR #{pr} 上还没有 AI 评审评论。")
+        return 0
+    last = reviews[-1]
+    issues = parse_issue_rows(last.get("body"))
+    cutoff = last.get("updated_at") or last.get("created_at") or ""
+    replies = [c.get("body") for c in comments
+               if (c.get("created_at") or "") > cutoff]
+    useful, noise = parse_feedback(replies)
+    by_sev = {"高": [0, 0], "中": [0, 0], "低": [0, 0]}
+    for n, sev in issues.items():
+        by_sev[sev][0] += 1
+        if n in noise:
+            by_sev[sev][1] += 1
+    total = sum(v[0] for v in by_sev.values())
+    bad = sum(v[1] for v in by_sev.values())
+    rate = (bad / total * 100) if total else 0.0
+    print(f"PR #{pr}：最近一次评审（更新于 {cutoff}）给了 {total} 条问题"
+          f"（高 {by_sev['高'][0]} / 中 {by_sev['中'][0]} / 低 {by_sev['低'][0]}）")
+    if total == 0:
+        print("这条评论没有可统计的问题。")
+        return 0
+    print(f"标 noise {bad} 条 → 误报率 {rate:.1f}%；明确 useful {useful} 次。")
+    for sev in ("高", "中", "低"):
+        t, b = by_sev[sev]
+        if t:
+            print(f"  {sev}：{b}/{t} 被标 noise")
+    if useful == 0 and bad == 0:
+        print("还没有任何反馈——先按评论底部的格式回一条，数据才有意义。")
+    return 0
 
 
 # ---------------------------------------------------------------- 主流程
@@ -764,6 +877,7 @@ def run(args):
             break
         page += 1
     commits = api(f"https://api.github.com/repos/{args.repo}/pulls/{args.pr}/commits?per_page=30", gh)
+    meta["_files_list"] = [f.get("filename") or "" for f in files]
 
     note = ""
     if args.wait_audit:
@@ -984,6 +1098,20 @@ def selftest():
     check("低级问题折叠", body.index("重复代码") < body.index("<details>") < body.index("命名不规范"))
     check("负担写在评论里", "细看" in body and "不是质量评分" in body)
 
+    check("模块归组：功能包", module_of("app/src/main/java/dev/loglens/capture/CaptureController.kt") == "capture")
+    check("模块归组：工具", module_of("tools/pr_review.py") == "tools")
+    check("模块归组：根文件", module_of("README.md") == "根")
+    dist = render_change_map([{"filename": "app/src/main/java/dev/loglens/capture/A.kt"},
+                              {"filename": "app/src/main/java/dev/loglens/ui/B.kt"},
+                              {"filename": "tools/x.py"}])
+    check("改动分布跨模块提示", "capture 1 个文件" in dist and "跨 3 个模块" in dist)
+    table = issue_table([{"severity": "高", "where": "a", "what": "b", "fix": "c"}], 1)
+    check("表头带序号列", "| # |" in table[0] and table[2].startswith("| 1 |"))
+    rows = parse_issue_rows(body)
+    check("序号与严重度可回读", rows.get(1) == "高" and rows.get(3) == "低")
+    f_useful, f_noise = parse_feedback(["useful", "noise 2, 5", "随便说两句"])
+    check("反馈解析", f_useful == 1 and f_noise == {2, 5})
+
     bad = normalize({"verdict": "不合理", "why": "夹带工作流", "quality": {"score": 1}})
     body = render(meta, bad, 1, 0, "m")
     check("不合理不自动关", "不会自动关闭" in body)
@@ -1010,11 +1138,18 @@ def main():
     p.add_argument("--ensure-labels", action="store_true")
     p.add_argument("--stub", help="用本地 JSON 代替模型调用（调试渲染用）")
     p.add_argument("--selftest", action="store_true")
+    p.add_argument("--stats", action="store_true",
+                   help="统计最近一次评审被标 noise 的比例（只读评论，不调模型、不花钱）")
     a = p.parse_args()
     if a.selftest:
         return selftest()
     if not (a.pr and a.repo):
         p.error("需要 --pr 和 --repo")
+    if a.stats:
+        gh = token()
+        if not gh:
+            p.error("--stats 需要 GITHUB_TOKEN 或 GH_TOKEN")
+        return run_stats(a.repo, a.pr, gh)
     return run(a)
 
 
