@@ -158,7 +158,7 @@ App 内还提供了一份逐条摊开的说明：**设置 → 关于 → 隐私�
 
 **没有自动发布，也没有 CI 拿签名密钥跑构建。** 安装包只在维护者本机用固定 keystore 编出来、手工上传。别人提的 PR 只看源码，永远不会变成你手机上那个包——顺带说一句，任何 PR 附带的 APK 都不予采用。
 
-**CI 会编译，但不产包。** `build` 这个 job 在一次性 ubuntu runner 上 `git clone` 后跑 `:app:assembleDebug :app:testDebugUnitTest`：`pull_request` 触发（令牌只读、仓库 secret 不注入）、40 分钟封顶、不保留任何产物。它要证明的只有两件事——这份代码编得过、60 个纯 JVM 单测（日志解析、查询语法、过滤、`ps` 表解析）全绿；APK 还是只在维护者本机签名出。
+**CI 会编译，但不产包。** `build` 这个 job 在一次性 ubuntu runner 上 `git clone` 后跑 `:app:assembleDebug :app:testDebugUnitTest`：`pull_request` 触发（令牌只读、仓库 secret 不注入）、40 分钟封顶、不保留任何产物。它要证明的只有两件事——这份代码编得过、60 个纯 JVM 单测（日志解析、查询语法、过滤、`ps` 表解析）全绿；APK 还是只在维护者本机签名出。这两个 job（`编译 + 单测`、`文档引用`）都已设为 `main` 的必需检查，红着就合不进去。
 
 **合并前有一道机器闸门。** 每个 PR 都会跑 `pr-audit`：它只读 diff 文本、不执行 PR 里的代码、不 checkout PR，按 14 个分类查——仓库结构与供应链文件、文件名与路径、二进制与伪装文件、Manifest 权限与组件、构建脚本与依赖、网络、上报遥测、动态加载与命令执行、敏感数据能力、后台常驻、混淆与不可见字符、密钥泄露、PR 元信息，外加逐提交复查。逐提交复查就是防「先加后撤」：某个提交里偷偷加了东西、后面再撤销，净 diff 看着干净，也会被拦下来。规则逐条写在 [`security/audit-rules.md`](security/audit-rules.md)，背后对应的是真实发生过的投毒事件（SLSA 的 commit graph 攻击、Datadog 的 hackerbot-claw 文件名注入、Trojan Source 的双向控制符、依赖混淆与仿冒包名等），不是拍脑袋想的。规则自带 50 条自测（python tools/test_pr_audit.py），改规则必须同时补用例并跑通，否则等于给自己留了个假闸门。
 
@@ -194,4 +194,5 @@ Copyright (C) 2026 LogLens。作为唯一版权人，作者保留另行授权（
 ## 致谢
 
 [Shizuku](https://github.com/RikkaApps/Shizuku)（RikkaApps）提供 shell 通道；[Miuix](https://github.com/compose-miuix-ui/miuix) 提供 HyperOS 风格组件。
+
 
