@@ -104,6 +104,14 @@ gradlew.bat assembleDebug    # Windows
 # 产物：app/build/outputs/apk/debug/app-debug.apk
 ```
 
+依赖是做了校验的：`gradle/verification-metadata.xml` 里记着每个构件的 SHA-256，下载到的包对不上会直接报 `Dependency verification failed` 并把差的那几个列出来。正常开发不用管；**只有加/升依赖时才需要**重新生成：
+
+```bash
+./gradlew --write-verification-metadata sha256 --refresh-dependencies assembleDebug
+```
+
+生成完把 `gradle/verification-metadata.xml` 的 diff 一起提交，审查的人就能看到这次动了哪些构件。
+
 release 默认开 R8。要出可安装的 release 包，在仓库根目录放 `keystore.properties`（已在 `.gitignore` 排除）：
 
 ```properties
@@ -137,6 +145,20 @@ App 自己的运行日志（`files/self_log/`）同理，只在本机、只记 L
 
 App 内还提供了一份逐条摊开的说明：**设置 → 关于 → 隐私说明**，把实际申请的每一项敏感权限（应用列表、可选的「使用情况访问」、悬浮窗、落盘）都写清楚读什么、写到哪、不读什么，不用去翻网页。
 
+
+## 安全与信任
+
+这个 App 拿着 Shizuku 的 shell 级权限，所以「你装的是不是我以为的那个包」值得多说两句。
+
+**只从 Releases 下。** 群文件、网盘、别人转的 APK 都不是本仓库产出的；有人会二次打包换图标再分发，装上去依然叫 LogLens。
+
+**装之前核对两件事**：Release 里随附的 `LogLens-x.y.z.apk.sha256` 要和文件对得上；签名证书指纹必须是 `1C:75:ED:15:BB:CB:B1:D4:44:CF:E6:7C:23:65:0C:6A:CA:B7:75:E8:13:8B:04:35:A6:DE:6C:18:BE:DF:C6:AC`（`apksigner verify --print-certs` 就能看）。指纹变了就是另一个包，和 1.2.4 没法互相覆盖升级。
+
+**依赖是逐个核对过的。** `gradle/verification-metadata.xml` 钉住 550 多个构件的 SHA-256，算上国内镜像在内任何一层返回被替换的构件，构建都会直接中断；依赖版本全部写死，不用 `+`、不用 SNAPSHOT，也不挂 JitPack 这种「从任意仓库现编」的源。
+
+**没有自动发布，也没有 CI 拿签名密钥跑构建。** 安装包只在维护者本机用固定 keystore 编出来、手工上传。别人提的 PR 只看源码，永远不会变成你手机上那个包——顺带说一句，任何 PR 附带的 APK 都不予采用。
+
+`main` 分支受保护：要开 PR、要审查通过、禁止强推；`.github/CODEOWNERS` 把所有路径指向维护者，等于绕不过审查。漏洞请走私密报告，别开公开 Issue，细节见 [SECURITY.md](SECURITY.md)。
 
 ## 许可
 
