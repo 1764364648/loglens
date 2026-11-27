@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
+import dev.loglens.data.IssueHit
 import dev.loglens.data.IssueRules
 import dev.loglens.data.OfflineImport
 import dev.loglens.data.OfflineLog
@@ -37,6 +38,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -120,6 +123,7 @@ import dev.loglens.ui.theme.LocalLogPalette
 import dev.loglens.ui.theme.LogPalette
 import dev.loglens.util.ExportFormat
 import dev.loglens.util.Exporter
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.sample
@@ -155,6 +159,96 @@ private object Bookmarks {
     fun clear() {
         entries.clear()
         ids.clear()
+    }
+}
+
+
+/**
+ * LogScreen 的界面状态容器。
+ *
+ * 这些状态原本是同一个 1086 行函数里的 40 来个 `remember`，读写点横跨顶栏、筛选、
+ * 工具条、列表和八个弹窗——想改一处字号都得读完一千行。抽成普通类之后，主函数只剩
+ * 「采集 → 过滤 → 渲染」的流水线，各区域各成一个 composable，共享同一个实例。
+ *
+ * 它不是 ViewModel：没有生命周期、不读磁盘、不跨页面存活，边界就是这次组合，
+ * 与原来 `remember` 的语义完全一致（离开日志页照样丢弃）。
+ */
+private class LogScreenUi(val prefs: Prefs) {
+
+    private val maxRows = prefs.maxRows
+
+    val items = mutableStateListOf<LogEntry>()
+    val hold = mutableStateListOf<LogEntry>()
+    /** 进过列表的 id，LazyColumn 的 key 必须唯一，重复 key 直接崩 */
+    val seen = HashSet<Long>()
+    val holdIds = HashSet<Long>()
+    val pausedRef = java.util.concurrent.atomic.AtomicBoolean(false)
+    val picked = mutableStateListOf<Long>()
+
+    var paused by mutableStateOf(false)
+    var heldCount by mutableIntStateOf(0)
+    var autoScroll by mutableStateOf(prefs.autoScroll)
+
+    // ── 过滤条件 ────────────────────────────────────────────
+    var query by mutableStateOf("")
+    var regex by mutableStateOf(prefs.searchRegex)
+    var minPriority by mutableIntStateOf(prefs.minLevelPriority)
+    var onlyCrash by mutableStateOf(false)
+    var onlyBookmarked by mutableStateOf(false)
+    var tagInclude by mutableStateOf(prefs.filterTagsInclude)
+    var tagExclude by mutableStateOf(prefs.filterTagsExclude)
+    var pidFilter by mutableStateOf(prefs.filterPids)
+    var advancedOpen by mutableStateOf(false)
+    var bookmarkVersion by mutableIntStateOf(0)
+    var exportOpen by mutableStateOf(false)
+    var exportFormat by mutableStateOf(ExportFormat.of(prefs.exportFormat))
+
+    // ── 高亮 / 预设 / 崩溃归集 ──────────────────────────────
+    var highlightRules by mutableStateOf(HighlightStore.load(prefs))
+    var highlightOpen by mutableStateOf(false)
+    var crashOpen by mutableStateOf(false)
+
+    var issueOpen by mutableStateOf(false)
+    var filesOpen by mutableStateOf(false)
+    var buffersOpen by mutableStateOf(false)
+    var tagsOpen by mutableStateOf(false)
+    var selectMode by mutableStateOf(false)
+    var actionEntry by mutableStateOf<LogEntry?>(null)
+    var history by mutableStateOf(prefs.queryHistory.split("\n").filter { it.isNotBlank() })
+
+    var fileItems by mutableStateOf<List<LogFiles.Item>>(emptyList())
+    var bufferSet by mutableStateOf(
+        prefs.buffers.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    )
+    var overlayAlive by mutableStateOf(OverlayLogService.alive)
+    var presets by mutableStateOf(PresetStore.load(prefs))
+    var activePreset by mutableStateOf<String?>(null)
+    var crashRows by mutableStateOf<List<CrashAggregate>>(emptyList())
+    var crashCounts by mutableStateOf(Triple(0, 0, 0))
+    var findCursor by mutableIntStateOf(-1)
+    var expandedFolds by mutableStateOf<Set<String>>(emptySet())
+    // 跳转闪烁定位：命中行的 entry.id，2 秒后自动清除
+    var jumpFlash by mutableStateOf<Long?>(null)
+    var jumpHint by mutableStateOf<String?>(null)
+
+    // 拉进程名表用的计数与去重键
+    var procTick by mutableIntStateOf(0)
+    var procRefreshedFor by mutableStateOf<String?>(null)
+
+    var stats by mutableStateOf(LogRepository.statsSnapshot())
+
+    /** 恢复渲染：把暂停期间压着的行一次性补进列表 */
+    fun flushHold(scope: CoroutineScope, listState: LazyListState) {
+        if (hold.isNotEmpty()) {
+            val restore = ArrayList<LogEntry>(hold.size)
+            for (e in hold) if (seen.add(e.id)) restore.add(e)
+            hold.clear()
+            holdIds.clear()
+            items.addAll(0, restore)
+            trimList(items, seen, maxRows)
+        }
+        heldCount = 0
+        if (autoScroll) scope.launch { runCatching { listState.scrollToItem(0) } }
     }
 }
 
@@ -194,125 +288,70 @@ fun LogScreen(
             }.start()
         }
     }
+
     val colors = MaterialTheme.colorScheme
     val palette = LocalLogPalette.current
 
     val maxRows = prefs.maxRows
     // 仓库上限跟界面口径对齐，避免内存里留着 5000 行而界面只认 2500
     LogRepository.capacity = maxRows
-    val compact = prefs.compactRows
-    val showTime = prefs.showTime
-    val showPid = prefs.showPid
-    val fontSize = prefs.fontSize
-    val highlightCrash = prefs.highlightCrash
 
-    val items = remember { mutableStateListOf<LogEntry>() }
-    val hold = remember { mutableStateListOf<LogEntry>() }
-    // 进过列表的 id，LazyColumn 的 key 必须唯一，重复 key 直接崩
-    val seen = remember { HashSet<Long>() }
-    val holdIds = remember { HashSet<Long>() }
-    val pausedRef = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-    var paused by remember { mutableStateOf(false) }
-    var heldCount by remember { mutableStateOf(0) }
-    var autoScroll by remember { mutableStateOf(prefs.autoScroll) }
-
-    // ── 过滤条件 ────────────────────────────────────────────
-    var query by remember { mutableStateOf("") }
-    var regex by remember { mutableStateOf(prefs.searchRegex) }
-    var minPriority by remember { mutableIntStateOf(prefs.minLevelPriority) }
-    var onlyCrash by remember { mutableStateOf(false) }
-    var onlyBookmarked by remember { mutableStateOf(false) }
-    var tagInclude by remember { mutableStateOf(prefs.filterTagsInclude) }
-    var tagExclude by remember { mutableStateOf(prefs.filterTagsExclude) }
-    var pidFilter by remember { mutableStateOf(prefs.filterPids) }
-    var advancedOpen by remember { mutableStateOf(false) }
-    var bookmarkVersion by remember { mutableIntStateOf(0) }
-    var exportOpen by remember { mutableStateOf(false) }
-    var exportFormat by remember { mutableStateOf(ExportFormat.of(prefs.exportFormat)) }
-
-    // ── 高亮 / 预设 / 崩溃归集 ──────────────────────────────
-    var highlightRules by remember { mutableStateOf(HighlightStore.load(prefs)) }
-    var highlightOpen by remember { mutableStateOf(false) }
-    var crashOpen by remember { mutableStateOf(false) }
-
-    var issueOpen by remember { mutableStateOf(false) }
-    var filesOpen by remember { mutableStateOf(false) }
-    var buffersOpen by remember { mutableStateOf(false) }
-    var tagsOpen by remember { mutableStateOf(false) }
-    var selectMode by remember { mutableStateOf(false) }
-    val picked = remember { mutableStateListOf<Long>() }
-    var actionEntry by remember { mutableStateOf<LogEntry?>(null) }
-    var history by remember { mutableStateOf(prefs.queryHistory.split("\n").filter { it.isNotBlank() }) }
+    // 界面状态全部搬进容器；主函数只保留「采集 → 过滤 → 渲染」这条流水线
+    val ui = remember { LogScreenUi(prefs) }
 
     // 搜索词停留 1.2s 才记进历史，避免边打字边存一堆半截词
-    LaunchedEffect(query) {
-        if (query.trim().length < 2) return@LaunchedEffect
+    LaunchedEffect(ui.query) {
+        if (ui.query.trim().length < 2) return@LaunchedEffect
         kotlinx.coroutines.delay(1200)
-        prefs.pushQuery(query)
-        history = prefs.queryHistory.split("\n").filter { it.isNotBlank() }
+        prefs.pushQuery(ui.query)
+        ui.history = prefs.queryHistory.split("\n").filter { it.isNotBlank() }
     }
-    var fileItems by remember { mutableStateOf<List<LogFiles.Item>>(emptyList()) }
-    var bufferSet by remember { mutableStateOf(prefs.buffers.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()) }
-    var overlayAlive by remember { mutableStateOf(OverlayLogService.alive) }
-    val offlineVersion by OfflineLog.version.collectAsState()
-    var presets by remember { mutableStateOf(PresetStore.load(prefs)) }
-    var activePreset by remember { mutableStateOf<String?>(null) }
-    var crashRows by remember { mutableStateOf<List<CrashAggregate>>(emptyList()) }
-    var crashCounts by remember { mutableStateOf(Triple(0, 0, 0)) }
-    var findCursor by remember { mutableIntStateOf(-1) }
-    var expandedFolds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    // 跳转闪烁定位：命中行的 entry.id，2 秒后自动清除
-    var jumpFlash by remember { mutableStateOf<Long?>(null) }
-    var jumpHint by remember { mutableStateOf<String?>(null) }
 
-    val highlighter = remember(highlightRules) { CompiledHighlights(highlightRules) }
+    // 离线模式切换也要触发重组（离线内容不走 items，只能靠版本号推动）
+    val offlineVersion by OfflineLog.version.collectAsState()
+
+    val highlighter = remember(ui.highlightRules) { CompiledHighlights(ui.highlightRules) }
     val collapseStacks = prefs.collapseStacks
-    val showMinimap = prefs.showMinimap
-    val showCounts = prefs.showLevelCounts
 
     // 崩溃归集从全局仓库持续收数，这里只负责定时落盘和刷新界面
     LaunchedEffect(Unit) {
         while (isActive) {
-            crashRows = CrashStats.load(prefs)
-            crashCounts = CrashStats.counts(prefs)
+            ui.crashRows = CrashStats.load(prefs)
+            ui.crashCounts = CrashStats.counts(prefs)
             CrashStats.flush(prefs)
             delay(4_000)
         }
     }
 
     val filter = remember(
-        query, regex, minPriority, onlyCrash, onlyBookmarked,
-        tagInclude, tagExclude, pidFilter
+        ui.query, ui.regex, ui.minPriority, ui.onlyCrash, ui.onlyBookmarked,
+        ui.tagInclude, ui.tagExclude, ui.pidFilter
     ) {
         LogFilter(
-            query = query,
-            regex = regex,
-            minPriority = minPriority,
-            onlyCrash = onlyCrash,
-            onlyBookmarked = onlyBookmarked,
-            tagsInclude = LogFilter.splitTags(tagInclude),
-            tagsExclude = LogFilter.splitTags(tagExclude),
-            pids = parsePids(pidFilter)
+            query = ui.query,
+            regex = ui.regex,
+            minPriority = ui.minPriority,
+            onlyCrash = ui.onlyCrash,
+            onlyBookmarked = ui.onlyBookmarked,
+            tagsInclude = LogFilter.splitTags(ui.tagInclude),
+            tagsExclude = LogFilter.splitTags(ui.tagExclude),
+            pids = parsePids(ui.pidFilter)
         )
     }
     val compiled = remember(filter) { CompiledFilter(filter) }
 
     // package: / process: 这类查询靠 pid→进程名表；表是空的就现拉一次，
     // 放 IO 线程，不卡列表。拉到了用一个计数触发 viewData 重算。
-    var procTick by remember { mutableIntStateOf(0) }
-    var procRefreshedFor by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(filter.query) {
         val q = filter.query
-        if (q.isNotBlank() && PROC_QUERY.containsMatchIn(q) && procRefreshedFor != q) {
-            procRefreshedFor = q
-            if (withContext(Dispatchers.IO) { ProcNames.refresh() }) procTick++
+        if (q.isNotBlank() && PROC_QUERY.containsMatchIn(q) && ui.procRefreshedFor != q) {
+            ui.procRefreshedFor = q
+            if (withContext(Dispatchers.IO) { ProcNames.refresh() }) ui.procTick++
         }
     }
 
     val listState = rememberLazyListState()
-    // 统计数字不再逐条推流（原本每条日志写两次 StateFlow 纯属浪费），
-    // 改成跟 UI 的 160ms 批次一起取：肉眼无差别，采集侧少掉一整套唤醒与分配
-    var stats by remember { mutableStateOf(LogRepository.statsSnapshot()) }
+
     val blocked by CaptureController.logChannelBlocked.collectAsState()
     val logFile by CaptureController.logFile.collectAsState()
     // 采集会话的暂停态：从通知 / 岛上点暂停、继续时，页面这边要跟着切，不能两套状态各说各话
@@ -321,11 +360,11 @@ fun LogScreen(
     // 进页面时把缓冲一次性铺上，attach 是原子的，不会和增量通道抢数据
     LaunchedEffect(Unit) {
         val seed = LogRepository.attach()
-        if (items.isEmpty() && seen.isEmpty()) {
+        if (ui.items.isEmpty() && ui.seen.isEmpty()) {
             for (e in seed.asReversed()) {
-                if (seen.add(e.id)) items.add(e)
+                if (ui.seen.add(e.id)) ui.items.add(e)
             }
-            trimList(items, seen, maxRows)
+            trimList(ui.items, ui.seen, maxRows)
         }
     }
 
@@ -335,68 +374,54 @@ fun LogScreen(
         while (true) {
             delay(160)
             val batch = LogRepository.drainPending()
-            stats = LogRepository.statsSnapshot()
+            ui.stats = LogRepository.statsSnapshot()
             if (batch.isEmpty()) continue
 
-            if (pausedRef.get()) {
+            if (ui.pausedRef.get()) {
                 // 暂停时照常入账，只是不渲染，恢复后一次性补齐
                 val accepted = ArrayList<LogEntry>(batch.size)
-                for (e in batch) if (holdIds.add(e.id)) accepted.add(e)
+                for (e in batch) if (ui.holdIds.add(e.id)) accepted.add(e)
                 if (accepted.isNotEmpty()) {
-                    hold.addAll(0, accepted.asReversed())
-                    trimList(hold, holdIds, maxRows)
+                    ui.hold.addAll(0, accepted.asReversed())
+                    trimList(ui.hold, ui.holdIds, maxRows)
                 }
-                heldCount = hold.size
+                ui.heldCount = ui.hold.size
                 continue
             }
 
             val fresh = ArrayList<LogEntry>(batch.size)
-            for (e in batch) if (seen.add(e.id)) fresh.add(e)
+            for (e in batch) if (ui.seen.add(e.id)) fresh.add(e)
             if (fresh.isEmpty()) continue
-            items.addAll(0, fresh.asReversed())
-            trimList(items, seen, maxRows)
+            ui.items.addAll(0, fresh.asReversed())
+            trimList(ui.items, ui.seen, maxRows)
         }
-    }
-
-    // 恢复渲染：把暂停期间压着的行一次性补进列表
-    fun flushHold() {
-        if (hold.isNotEmpty()) {
-            val restore = ArrayList<LogEntry>(hold.size)
-            for (e in hold) if (seen.add(e.id)) restore.add(e)
-            hold.clear()
-            holdIds.clear()
-            items.addAll(0, restore)
-            trimList(items, seen, maxRows)
-        }
-        heldCount = 0
-        if (autoScroll) scope.launch { runCatching { listState.scrollToItem(0) } }
     }
 
     // 以采集会话为准同步页面：岛上/通知里点了暂停，这里也停更；恢复回来再接着刷
     LaunchedEffect(sessionPaused) {
-        if (sessionPaused && !paused) {
-            paused = true
-            pausedRef.set(true)
-            hold.clear()
-            holdIds.clear()
-            heldCount = 0
-        } else if (!sessionPaused && paused) {
-            paused = false
-            pausedRef.set(false)
-            flushHold()
+        if (sessionPaused && !ui.paused) {
+            ui.paused = true
+            ui.pausedRef.set(true)
+            ui.hold.clear()
+            ui.holdIds.clear()
+            ui.heldCount = 0
+        } else if (!sessionPaused && ui.paused) {
+            ui.paused = false
+            ui.pausedRef.set(false)
+            ui.flushHold(scope, listState)
         }
     }
 
     val snapshot = when {
                             OfflineLog.entries.isNotEmpty() -> OfflineLog.entries
-                            onlyBookmarked -> Bookmarks.entries.toList()
-                            else -> items.toList()
+                            ui.onlyBookmarked -> Bookmarks.entries.toList()
+                            else -> ui.items.toList()
                         }
-    val viewKey = bookmarkVersion
+    val viewKey = ui.bookmarkVersion
     // 一遍遍历同时得到「可视行」和「各级别条数」：
     // 两者只差一个 minPriority，所以先用不含级别的条件判一次，再各取所需。
     // 原来这里是两次全缓冲过滤 + 一次 distinctBy 装箱，2500 行下每 160ms 都要重跑一轮。
-    val viewData = remember(snapshot, compiled, filter.minPriority, viewKey, procTick) {
+    val viewData = remember(snapshot, compiled, filter.minPriority, viewKey, ui.procTick) {
         val env = compiled.env()
         val rows = ArrayList<LogEntry>(snapshot.size)
         val counts = IntArray(5)
@@ -434,8 +459,8 @@ fun LogScreen(
     val visible = viewData.first
     val levelCounts = viewData.second
 
-    val displayRows = remember(visible, collapseStacks, expandedFolds) {
-        if (collapseStacks) foldContinuations(visible, expandedFolds)
+    val displayRows = remember(visible, collapseStacks, ui.expandedFolds) {
+        if (collapseStacks) foldContinuations(visible, ui.expandedFolds)
         else visible.map { LogRowItem.One(it) }
     }
 
@@ -451,7 +476,7 @@ fun LogScreen(
                 it is LogRowItem.Fold && it.head.id == target.id
             } as? LogRowItem.Fold
             if (fold != null) {
-                expandedFolds = expandedFolds + fold.expandKey
+                ui.expandedFolds = ui.expandedFolds + fold.expandKey
                 idx = displayRows.indexOfFirst { it is LogRowItem.Fold && it.head.id == target.id }
             }
         }
@@ -465,20 +490,20 @@ fun LogScreen(
                 listState.scrollToItem((idx - 2).coerceAtLeast(0))
             }
         }
-        jumpFlash = target.id
-        jumpHint = "已定位 · 目标行高亮 2 秒"
+        ui.jumpFlash = target.id
+        ui.jumpHint = "已定位 · 目标行高亮 2 秒"
         scope.launch {
             delay(2200)
-            if (jumpFlash == target.id) jumpFlash = null
+            if (ui.jumpFlash == target.id) ui.jumpFlash = null
         }
         scope.launch {
             delay(4000)
-            if (jumpHint != null) jumpHint = null
+            if (ui.jumpHint != null) ui.jumpHint = null
         }
     }
 
-    LaunchedEffect(visible.size, autoScroll) {
-        if (autoScroll && visible.isNotEmpty() && listState.firstVisibleItemIndex <= 2) {
+    LaunchedEffect(visible.size, ui.autoScroll) {
+        if (ui.autoScroll && visible.isNotEmpty() && listState.firstVisibleItemIndex <= 2) {
             runCatching { listState.scrollToItem(0) }
         }
     }
@@ -488,162 +513,40 @@ fun LogScreen(
     Scaffold(
         containerColor = colors.background,
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            targetLabel.ifBlank { "实时日志" },
-                            style = MaterialTheme.typography.titleMedium,
-                            color = colors.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            targetPkg,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontFamily = FontFamily.Monospace
-                            ),
-                            color = colors.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            Icons.AutoMirrored.Rounded.ArrowBack,
-                            contentDescription = "返回",
-                            tint = colors.onSurface
-                        )
-                    }
-                },
-                actions = {
-                    StatusChip(
-                        label = when {
-                            paused || sessionPaused -> "已暂停"
-                            capturing -> "实时"
-                            else -> "已停止"
-                        },
-                        color = when {
-                            paused || sessionPaused -> palette.warn
-                            capturing -> palette.info
-                            else -> colors.onSurfaceVariant
-                        }
-                    )
-                    Spacer(Modifier.width(16.dp))
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.background)
+            LogTopBar(
+                ui = ui,
+                capturing = capturing,
+                sessionPaused = sessionPaused,
+                targetLabel = targetLabel,
+                targetPkg = targetPkg,
+                onBack = onBack
             )
         },
         bottomBar = {
-            if (selectMode) {
-                SelectionBar(
-                    count = picked.size,
-                    onCopy = {
-                        val list = visible.filter { it.id in picked }
-                        if (list.isEmpty()) {
-                            Toast.makeText(context, "没选日志", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Exporter.copy(context, Exporter.dump(list))
-                            Toast.makeText(context, "已复制 ${list.size} 行", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    onShare = {
-                        val list = visible.filter { it.id in picked }
-                        if (list.isEmpty()) {
-                            Toast.makeText(context, "没选日志", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Exporter.shareText(context, Exporter.dump(list))
-                        }
-                    },
-                    onSelectAll = {
-                        picked.clear()
-                        visible.forEach { picked.add(it.id) }
-                    },
-                    onExit = {
-                        selectMode = false
-                        picked.clear()
-                    }
-                )
-            } else {
-                LogActionBar(
-                    paused = paused,
-                    autoScroll = autoScroll,
-                    onPauseToggle = {
-                        val next = !paused
-                        paused = next
-                        pausedRef.set(next)
-                        if (next) {
-                            // 「暂停」就是真的停下采集：logcat 断流 → 通知和岛一起变「已暂停采集」，
-                            // 不再出现「页面说暂停了、日志还在涨」这种事
-                            CaptureController.pause()
-                            hold.clear()
-                            holdIds.clear()
-                            heldCount = 0
-                        } else {
-                            // 「继续」把会话按原参数拉回来，再补齐暂停期间压在手上的行
-                            CaptureController.resume()
-                            flushHold()
-                        }
-                    },
-                    onClear = {
-                        LogRepository.clear()
-                        items.clear()
-                        hold.clear()
-                        seen.clear()
-                        holdIds.clear()
-                        heldCount = 0
-                        // 清空后必须回到最新位置，否则新日志进来看不见，像是"清空后就不动了"
-                        scope.launch { runCatching { listState.scrollToItem(0) } }
-                        Toast.makeText(context, "已清空", Toast.LENGTH_SHORT).show()
-                    },
-                    onExport = { exportOpen = true },
-                    onShare = {
-                        scope.launch {
-                            val data = withContext(Dispatchers.IO) {
-                                visible.asReversed()
-                            }
-                            if (data.isEmpty()) {
-                                Toast.makeText(context, "没有可分享的日志", Toast.LENGTH_SHORT).show()
-                                return@launch
-                            }
-                            val file = withContext(Dispatchers.IO) {
-                                ExportFormats.export(context, data, targetPkg, exportFormat)
-                            }
-                            if (file != null) {
-                                runCatching {
-                                    ExportFormats.shareFile(context, file, exportFormat.mime)
-                                }
-                            } else {
-                                Toast.makeText(context, "分享失败", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    },
-                    onFollowToggle = {
-                        autoScroll = !autoScroll
-                        prefs.autoScroll = autoScroll
-                        if (autoScroll) scope.launch { listState.scrollToItem(0) }
-                    }
-                )
-            }
+            LogBottomBar(
+                ui = ui,
+                visible = visible,
+                prefs = prefs,
+                listState = listState,
+                targetPkg = targetPkg
+            )
         },
         floatingActionButton = {
-            if (!autoScroll) {
-                FloatingActionButton(
-                    onClick = {
-                        autoScroll = true
-                        prefs.autoScroll = true
-                    },
-                    containerColor = colors.primary,
-                    contentColor = colors.onPrimary
-                ) {
-                    Icon(
-                        Icons.Rounded.VerticalAlignBottom,
-                        contentDescription = "回到底部"
-                    )
-                }
-            }
+    if (!ui.autoScroll) {
+        FloatingActionButton(
+            onClick = {
+                ui.autoScroll = true
+                prefs.autoScroll = true
+            },
+            containerColor = colors.primary,
+            contentColor = colors.onPrimary
+        ) {
+            Icon(
+                Icons.Rounded.VerticalAlignBottom,
+                contentDescription = "回到底部"
+            )
+        }
+    }
         }
     ) { innerPadding ->
         Column(
@@ -651,528 +554,813 @@ fun LogScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            FilterSection(
-                query = query,
-                onQueryChange = {
-                    query = it
-                    prefs.searchRegex = regex
-                },
-                regex = regex,
-                onRegexToggle = {
-                    regex = !regex
-                    prefs.searchRegex = regex
-                },
-                regexInvalid = compiled.regexInvalid,
-                advancedOpen = advancedOpen,
-                onAdvancedToggle = { advancedOpen = !advancedOpen },
-                minPriority = minPriority,
-                onPriorityChange = {
-                    minPriority = it
-                    prefs.minLevelPriority = it
-                },
-                onlyCrash = onlyCrash,
-                onCrashToggle = { onlyCrash = !onlyCrash },
-                onlyBookmarked = onlyBookmarked,
-                onBookmarkToggle = { onlyBookmarked = !onlyBookmarked },
-                bookmarkCount = Bookmarks.count(),
+            LogToolsArea(
+                ui = ui,
+                prefs = prefs,
+                listState = listState,
+                compiled = compiled,
+                visible = visible,
                 levelCounts = levelCounts,
-                showCounts = showCounts,
-                statsLine = buildString {
-                    append("总计 ")
-                    append(fmt(stats.total))
-                    append(" 条 · 命中 ")
-                    append(fmt(visible.size.toLong()))
-                    append(" 条 · 崩溃 ")
-                    append(stats.crashes)
-                    if (!logFile.isNullOrBlank()) {
-                        // 别把「本会话有落盘文件」写成「正在写」：采集停了/暂停了，
-                        // logFile 仍然非空，标注要跟着采集状态走
-                        val writing = state is CaptureController.State.Capturing && !paused
-                        append(if (writing) " · 落盘中" else " · 已落盘")
-                    }
+                state = state,
+                logFile = logFile,
+                issueHits = issueHits,
+                onOpenDoc = {
+                    openDoc.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
                 }
             )
+            LogNotices(ui = ui, prefs = prefs, blocked = blocked)
+            LogListArea(
+                ui = ui,
+                visible = visible,
+                displayRows = displayRows,
+                compiled = compiled,
+                highlighter = highlighter,
+                listState = listState,
+                prefs = prefs,
+                blocked = blocked
+            )
+        }
+    }
 
-            ToolsBar(
-                presets = presets,
-                activePreset = activePreset,
-                onApplyPreset = { p ->
-                    activePreset = p.name
-                    query = p.query
-                    regex = p.regex
-                    prefs.searchRegex = p.regex
-                    minPriority = p.minPriority
-                    prefs.minLevelPriority = p.minPriority
-                    onlyCrash = p.onlyCrash
-                    onlyBookmarked = p.onlyBookmarked
-                    tagInclude = p.tagsInclude
-                    tagExclude = p.tagsExclude
-                    pidFilter = p.pids
-                    prefs.filterTagsInclude = p.tagsInclude
-                    prefs.filterTagsExclude = p.tagsExclude
-                    prefs.filterPids = p.pids
+    LogDialogs(
+        ui = ui,
+        prefs = prefs,
+        visible = visible,
+        targetPkg = targetPkg,
+        issueHits = issueHits,
+        onJump = { jumpToEntry(it) }
+    )
+}
+
+/** 顶栏：目标包名 + 采集状态胶囊。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LogTopBar(
+    ui: LogScreenUi,
+    capturing: Boolean,
+    sessionPaused: Boolean,
+    targetLabel: String,
+    targetPkg: String,
+    onBack: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    val palette = LocalLogPalette.current
+
+    TopAppBar(
+        title = {
+            Column {
+                Text(
+                    targetLabel.ifBlank { "实时日志" },
+                    style = MaterialTheme.typography.titleMedium,
+                    color = colors.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    targetPkg,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = colors.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        },
+        navigationIcon = {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Rounded.ArrowBack,
+                    contentDescription = "返回",
+                    tint = colors.onSurface
+                )
+            }
+        },
+        actions = {
+            StatusChip(
+                label = when {
+                    ui.paused || sessionPaused -> "已暂停"
+                    capturing -> "实时"
+                    else -> "已停止"
                 },
-                onDeletePreset = { p ->
-                    if (!p.builtin) {
-                        presets = PresetStore.remove(prefs, p.name)
-                        if (activePreset == p.name) activePreset = null
-                    }
-                },
-                onSaveCurrent = {
-                    val name = buildString {
-                        append(if (query.isBlank()) "筛选" else query.take(12))
-                        if (onlyCrash) append("·崩溃")
-                        if (onlyBookmarked) append("·书签")
-                        if (minPriority > 0) append("·")
-                            .append(LogLevel.entries.firstOrNull { it.priority == minPriority }?.letter ?: "+")
-                    }
-                    val preset = FilterPreset(
-                        name = name,
-                        query = query,
-                        regex = regex,
-                        minPriority = minPriority,
-                        onlyCrash = onlyCrash,
-                        onlyBookmarked = onlyBookmarked,
-                        tagsInclude = tagInclude,
-                        tagsExclude = tagExclude,
-                        pids = pidFilter
-                    )
-                    presets = PresetStore.upsert(prefs, preset)
-                    activePreset = name
-                    Toast.makeText(context, "已存为「$name」", Toast.LENGTH_SHORT).show()
-                },
-                highlightCount = highlightRules.count { it.enabled },
-                onOpenHighlights = { highlightOpen = true },
-                crashSummary = if (crashCounts.first > 0) "崩溃 今日${crashCounts.first}" else "崩溃归集",
-                onOpenCrashes = { crashOpen = true },
-                findTotal = if (query.isBlank()) 0 else visible.size,
-                onFindNext = {
-                    if (visible.isNotEmpty()) {
-                        findCursor = (findCursor + 1) % visible.size
-                        scope.launch { runCatching { listState.scrollToItem(findCursor) } }
-                    }
-                },
-                issueSummary = if (issueHits.isEmpty()) "问题体检" else "问题体检 ${issueHits.size}",
-                onOpenIssues = { issueOpen = true },
-                overlayOn = overlayAlive,
-                onOpenOverlay = {
-                    if (OverlayLogService.alive) {
-                        OverlayLogService.stop(context)
-                        overlayAlive = false
-                        Toast.makeText(context, "悬浮窗已关闭", Toast.LENGTH_SHORT).show()
-                    } else if (!OverlayLogService.canDraw(context)) {
-                        Toast.makeText(context, "先给「显示在其他应用上层」权限", Toast.LENGTH_LONG).show()
-                        runCatching {
-                            context.startActivity(
-                                Intent(
-                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                    Uri.parse("package:${context.packageName}")
-                                )
-                            )
-                        }
-                    } else {
-                        OverlayLogService.start(context)
-                        overlayAlive = true
-                        Toast.makeText(context, "悬浮窗已开，可拖动", Toast.LENGTH_SHORT).show()
-                    }
-                },
-                onOpenFile = {
-                    if (OfflineLog.entries.isNotEmpty()) {
-                        OfflineLog.clear()
-                        Toast.makeText(context, "已回到实时日志", Toast.LENGTH_SHORT).show()
-                    } else {
-                        openDoc.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
-                    }
-                },
-                onOpenHistory = {
-                    fileItems = LogFiles.list(context)
-                    filesOpen = true
-                },
-                onSnapshot = {
-                    if (visible.isEmpty()) {
-                        Toast.makeText(context, "没有可存的日志", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Thread {
-                            val f = SnapshotImage.render(
-                                context,
-                                visible,
-                                prefs.lastLabel.ifBlank { "日志快照" }
-                            )
-                            Handler(Looper.getMainLooper()).post {
-                                if (f != null) {
-                                    Toast.makeText(context, "已存图：${f.name}", Toast.LENGTH_LONG).show()
-                                    runCatching { ExportFormats.shareFile(context, f, "image/png") }
-                                } else {
-                                    Toast.makeText(context, "存图失败", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        }.start()
-                    }
-                },
-                onOpenBuffers = { buffersOpen = true },
-                bufferSummary = bufferSet.joinToString("/") { it },
-                onOpenTags = { tagsOpen = true },
-                selectMode = selectMode,
-                selectCount = picked.size,
-                bookmarkCount = remember(bookmarkVersion) { Bookmarks.count() },
-                onClearMarks = {
-                    Bookmarks.clear()
-                    bookmarkVersion++
-                    Toast.makeText(context, "已清除全部收藏", Toast.LENGTH_SHORT).show()
-                },
-                onToggleSelect = {
-                    selectMode = !selectMode
-                    if (!selectMode) picked.clear()
+                color = when {
+                    ui.paused || sessionPaused -> palette.warn
+                    capturing -> palette.info
+                    else -> colors.onSurfaceVariant
                 }
             )
+            Spacer(Modifier.width(16.dp))
+        },
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.background)
+    )
+}
 
-            if (OfflineLog.entries.isNotEmpty()) {
-                OfflineSourceBar(
-                    name = OfflineLog.sourceName,
-                    count = OfflineLog.entries.size,
-                    onClose = { OfflineLog.clear() }
-                )
-            }
+/** 底栏：多选操作条 / 采集操作条。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LogBottomBar(
+    ui: LogScreenUi,
+    visible: List<LogEntry>,
+    prefs: Prefs,
+    listState: LazyListState,
+    targetPkg: String
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val colors = MaterialTheme.colorScheme
 
-            actionEntry?.let { entry ->
-                EntryActionsDialog(
-                    title = "${entry.level.letter}/${entry.tag}",
-                    bookmarked = Bookmarks.has(entry.id),
-                    onCopy = {
-                        Exporter.copy(context, Exporter.formatEntry(entry))
-                        Toast.makeText(context, "已复制该行", Toast.LENGTH_SHORT).show()
-                    },
-                    onShare = { Exporter.shareText(context, Exporter.formatEntry(entry)) },
-                    onBookmark = {
-                        Bookmarks.toggle(entry)
-                        bookmarkVersion++
-                    },
-                    onFilterTag = {
-                        query = "tag:${entry.tag}"
-                        regex = false
-                    },
-                    onFilterPid = {
-                        query = "pid:${entry.pid}"
-                        regex = false
-                    },
-                    onDismiss = { actionEntry = null }
-                )
-            }
-
-            if (tagsOpen) {
-                val counts = remember(visible, tagsOpen) {
-                    visible.groupingBy { it.tag }.eachCount().entries
-                        .sortedByDescending { it.value }
-                        .take(40)
-                        .map { it.key to it.value }
-                }
-                TagStatsDialog(
-                    tags = counts,
-                    total = visible.size,
-                    onPick = { tag ->
-                        tagsOpen = false
-                        query = "tag:$tag"
-                        regex = false
-                    },
-                    onDismiss = { tagsOpen = false }
-                )
-            }
-
-            if (filesOpen) {
-                LogFilesDialog(
-                    items = fileItems,
-                    onOpen = { item ->
-                        // 直接回放：以前点历史文件交给系统 ACTION_VIEW，会弹「打开方式」把日志踢出 App。
-                        // 这里内部解析后进离线视图，过滤与搜索照常可用。
-                        Thread {
-                            val parsed = runCatching {
-                                OfflineImport.parse(item.file.readText())
-                            }.getOrDefault(emptyList())
-                            Handler(Looper.getMainLooper()).post {
-                                if (parsed.isEmpty()) {
-                                    Toast.makeText(context, "读不出内容，确认是 logcat 文本", Toast.LENGTH_SHORT)
-                                        .show()
-                                } else {
-                                    OfflineLog.load(parsed, item.name)
-                                    filesOpen = false
-                                    Toast.makeText(
-                                        context,
-                                        "已回放 ${item.name}（${parsed.size} 行）",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
-                        }.start()
-                    },
-                    onShare = { item -> runCatching { LogFiles.share(context, item) } },
-                    onDelete = { item ->
-                        if (LogFiles.remove(item)) {
-                            fileItems = LogFiles.list(context)
-                            Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    onDismiss = { filesOpen = false }
-                )
-            }
-
-            if (buffersOpen) {
-                BufferDialog(
-                    selected = bufferSet,
-                    onToggle = { key ->
-                        val next = if (bufferSet.contains(key)) bufferSet - key else bufferSet + key
-                        if (next.isEmpty()) {
-                            Toast.makeText(context, "至少留一个缓冲区", Toast.LENGTH_SHORT).show()
-                        } else {
-                            bufferSet = next
-                            prefs.buffers = next.joinToString(",")
-                            Toast.makeText(context, "改完重启抓取生效", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    onDismiss = { buffersOpen = false },
-                    onClearDevice = {
-                        Thread {
-                            val r = dev.loglens.shizuku.ShellRunner.exec("logcat -b all -c")
-                            Handler(Looper.getMainLooper()).post {
-                                Toast.makeText(
-                                    context,
-                                    if (r.code == 0) "设备日志缓冲已清空" else "清空失败：${r.stderr.take(60)}",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }.start()
-                    }
-                )
-            }
-
-            if (issueOpen) {
-                IssueDialog(
-                    hits = issueHits,
-                    onJump = { hit ->
-                        issueOpen = false
-                        jumpToEntry(hit.sample)
-                    },
-                    onDismiss = { issueOpen = false }
-                )
-            }
-
-            if (advancedOpen) {
-                AdvancedFilterPanel(
-                    tagInclude = tagInclude,
-                    onTagInclude = {
-                        tagInclude = it
-                        prefs.filterTagsInclude = it
-                    },
-                    tagExclude = tagExclude,
-                    onTagExclude = {
-                        tagExclude = it
-                        prefs.filterTagsExclude = it
-                    },
-                    pids = pidFilter,
-                    onPids = {
-                        pidFilter = it
-                        prefs.filterPids = it
-                    },
-                    onReset = {
-                        query = ""
-                        regex = false
-                        prefs.searchRegex = false
-                        minPriority = LogLevel.VERBOSE.priority
-                        prefs.minLevelPriority = minPriority
-                        onlyCrash = false
-                        onlyBookmarked = false
-                        tagInclude = ""
-                        tagExclude = ""
-                        pidFilter = ""
-                        prefs.filterTagsInclude = ""
-                        prefs.filterTagsExclude = ""
-                        prefs.filterPids = ""
-                    }
-                )
-            }
-
-            jumpHint?.let { hint ->
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 2.dp),
-                    shape = RoundedCornerShape(10.dp),
-                    color = palette.warn.copy(alpha = 0.14f),
-                    contentColor = palette.warn
-                ) {
-                    Text(
-                        hint,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                    )
-                }
-            }
-
-            if (paused) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    shape = RoundedCornerShape(10.dp),
-                    color = palette.warn.copy(alpha = 0.12f),
-                    contentColor = palette.warn
-                ) {
-                    Text(
-                        if (heldCount > 0) {
-                            "已暂停采集，这期间新进来 ${fmt(heldCount.toLong())} 条，点「继续」补齐"
-                        } else {
-                            "已暂停采集 · 日志流已停，点「继续」恢复抓取"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                    )
-                }
-            }
-
-            if (blocked) {
-                ChannelBlockedCard(
-                    onDismiss = { CaptureController.dismissChannelBlocked() },
-                    onOpenDialer = {
-                        if (!DeviceLogGuard.openDialer(context)) {
-                            Exporter.copy(context, DeviceLogGuard.ENGINEER_CODE)
-                            Toast.makeText(
-                                context,
-                                "无法调起拨号盘，工程码已复制",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    },
-                    onRaiseLevel = {
-                        scope.launch {
-                            val r = withContext(Dispatchers.IO) { DeviceLogGuard.raiseLevel() }
-                            Toast.makeText(context, r, Toast.LENGTH_LONG).show()
-                        }
-                    }
-                )
-            }
-
-            if (history.isNotEmpty()) {
-                HistoryChips(
-                    history = history.take(8),
-                    onPick = { q ->
-                        query = q
-                        regex = false
-                    },
-                    onRemove = { q ->
-                        prefs.dropQuery(q)
-                        history = prefs.queryHistory.split("\n").filter { it.isNotBlank() }
-                    }
-                )
-                Spacer(Modifier.height(4.dp))
-            }
-
-            Spacer(Modifier.height(4.dp))
-
-            Box(Modifier.weight(1f)) {
-                if (visible.isEmpty()) {
-                    EmptyLogs(
-                        blocked = blocked,
-                        hasAny = items.isNotEmpty(),
-                        onlyBookmarked = onlyBookmarked
-                    )
+    if (ui.selectMode) {
+        SelectionBar(
+            count = ui.picked.size,
+            onCopy = {
+                val list = visible.filter { it.id in ui.picked }
+                if (list.isEmpty()) {
+                    Toast.makeText(context, "没选日志", Toast.LENGTH_SHORT).show()
                 } else {
-                    Row(Modifier.fillMaxSize()) {
-                        LazyColumn(
-                            state = listState,
-                            reverseLayout = true,
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp)
-                        ) {
-                            items(items = displayRows, key = { it.key }) { row ->
-                                when (row) {
-                                    is LogRowItem.One -> {
-                                        val entry = row.entry
-                                        val bookmarked = Bookmarks.has(entry.id)
-                                        LogRow(
-                                            entry = entry,
-                                            highlightCrash = highlightCrash,
-                                            compact = compact,
-                                            showTime = showTime,
-                                            showPid = showPid,
-                                            fontSize = fontSize,
-                                            bookmarked = bookmarked,
-                                            flashed = entry.id == jumpFlash,
-                                            compiled = compiled,
-                                            highlighter = highlighter,
-                                            queryColor = palette.warn,
-                                            selectMode = selectMode,
-                                            selected = entry.id in picked,
-                                            onToggleSelect = {
-                                                if (entry.id in picked) picked.remove(entry.id)
-                                                else picked.add(entry.id)
-                                            },
-                                            onMenu = { actionEntry = entry },
-                                            onCopy = {
-                                                Exporter.copy(context, Exporter.formatEntry(entry))
-                                                Toast.makeText(context, "已复制该行", Toast.LENGTH_SHORT).show()
-                                            },
-                                            onBookmark = {
-                                                val added = Bookmarks.toggle(entry)
-                                                // 取消收藏后触发器必须递增，否则「只看书签」视图不会刷新
-                                                bookmarkVersion++
-                                                Toast.makeText(
-                                                    context,
-                                                    if (added) "已收藏该行" else "已取消收藏",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            }
-                                        )
-                                    }
-
-                                    is LogRowItem.Fold -> {
-                                        FoldRow(
-                                            count = row.count,
-                                            kind = row.kind,
-                                            head = row.head,
-                                            expanded = row.expandKey in expandedFolds,
-                                            onToggle = {
-                                                expandedFolds = if (row.expandKey in expandedFolds) {
-                                                    expandedFolds - row.expandKey
-                                                } else {
-                                                    expandedFolds + row.expandKey
-                                                }
-                                            }
-                                        )
-                                    }
-                                }
-                            }
+                    Exporter.copy(context, Exporter.dump(list))
+                    Toast.makeText(context, "已复制 ${list.size} 行", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onShare = {
+                val list = visible.filter { it.id in ui.picked }
+                if (list.isEmpty()) {
+                    Toast.makeText(context, "没选日志", Toast.LENGTH_SHORT).show()
+                } else {
+                    Exporter.shareText(context, Exporter.dump(list))
+                }
+            },
+            onSelectAll = {
+                ui.picked.clear()
+                visible.forEach { ui.picked.add(it.id) }
+            },
+            onExit = {
+                ui.selectMode = false
+                ui.picked.clear()
+            }
+        )
+    } else {
+        LogActionBar(
+            paused = ui.paused,
+            autoScroll = ui.autoScroll,
+            onPauseToggle = {
+                val next = !ui.paused
+                ui.paused = next
+                ui.pausedRef.set(next)
+                if (next) {
+                    // 「暂停」就是真的停下采集：logcat 断流 → 通知和岛一起变「已暂停采集」，
+                    // 不再出现「页面说暂停了、日志还在涨」这种事
+                    CaptureController.pause()
+                    ui.hold.clear()
+                    ui.holdIds.clear()
+                    ui.heldCount = 0
+                } else {
+                    // 「继续」把会话按原参数拉回来，再补齐暂停期间压在手上的行
+                    CaptureController.resume()
+                    ui.flushHold(scope, listState)
+                }
+            },
+            onClear = {
+                LogRepository.clear()
+                ui.items.clear()
+                ui.hold.clear()
+                ui.seen.clear()
+                ui.holdIds.clear()
+                ui.heldCount = 0
+                // 清空后必须回到最新位置，否则新日志进来看不见，像是"清空后就不动了"
+                scope.launch { runCatching { listState.scrollToItem(0) } }
+                Toast.makeText(context, "已清空", Toast.LENGTH_SHORT).show()
+            },
+            onExport = { ui.exportOpen = true },
+            onShare = {
+                scope.launch {
+                    val data = withContext(Dispatchers.IO) {
+                        visible.asReversed()
+                    }
+                    if (data.isEmpty()) {
+                        Toast.makeText(context, "没有可分享的日志", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    val file = withContext(Dispatchers.IO) {
+                        ExportFormats.export(context, data, targetPkg, ui.exportFormat)
+                    }
+                    if (file != null) {
+                        runCatching {
+                            ExportFormats.shareFile(context, file, ui.exportFormat.mime)
                         }
-                        if (showMinimap) {
-                            MinimapBar(
-                                rows = visible,
-                                onSeek = { ratio ->
-                                    // ratio 0 = 小地图顶部 = 最旧的一条。
-                                    // reverseLayout 下 index 0 在底部（最新），所以取反；
-                                    // 下标也必须按实际渲染的 displayRows 算（折叠后条数不同）。
-                                    val last = displayRows.size - 1
-                                    val idx = ((1f - ratio) * last).toInt().coerceIn(0, last)
-                                    scope.launch { runCatching { listState.scrollToItem(idx) } }
-                                },
-                                modifier = Modifier
-                                    .fillMaxHeight()
-                                    .padding(top = 4.dp, bottom = 8.dp, end = 2.dp)
-                            )
+                    } else {
+                        Toast.makeText(context, "分享失败", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onFollowToggle = {
+                ui.autoScroll = !ui.autoScroll
+                prefs.autoScroll = ui.autoScroll
+                if (ui.autoScroll) scope.launch { listState.scrollToItem(0) }
+            }
+        )
+    }
+}
+
+/** 筛选区：搜索框、工具条、离线来源条、高级过滤面板。 */
+@OptIn(
+    ExperimentalFoundationApi::class,
+    ExperimentalMaterial3Api::class,
+    kotlinx.coroutines.FlowPreview::class
+)
+@Composable
+private fun LogToolsArea(
+    ui: LogScreenUi,
+    prefs: Prefs,
+    listState: LazyListState,
+    compiled: CompiledFilter,
+    visible: List<LogEntry>,
+    levelCounts: IntArray,
+    state: CaptureController.State,
+    logFile: String?,
+    issueHits: List<IssueHit>,
+    onOpenDoc: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val colors = MaterialTheme.colorScheme
+    val palette = LocalLogPalette.current
+    val showCounts = prefs.showLevelCounts
+
+    FilterSection(
+        query = ui.query,
+        onQueryChange = {
+            ui.query = it
+            prefs.searchRegex = ui.regex
+        },
+        regex = ui.regex,
+        onRegexToggle = {
+            ui.regex = !ui.regex
+            prefs.searchRegex = ui.regex
+        },
+        regexInvalid = compiled.regexInvalid,
+        advancedOpen = ui.advancedOpen,
+        onAdvancedToggle = { ui.advancedOpen = !ui.advancedOpen },
+        minPriority = ui.minPriority,
+        onPriorityChange = {
+            ui.minPriority = it
+            prefs.minLevelPriority = it
+        },
+        onlyCrash = ui.onlyCrash,
+        onCrashToggle = { ui.onlyCrash = !ui.onlyCrash },
+        onlyBookmarked = ui.onlyBookmarked,
+        onBookmarkToggle = { ui.onlyBookmarked = !ui.onlyBookmarked },
+        bookmarkCount = Bookmarks.count(),
+        levelCounts = levelCounts,
+        showCounts = showCounts,
+        statsLine = buildString {
+            append("总计 ")
+            append(fmt(ui.stats.total))
+            append(" 条 · 命中 ")
+            append(fmt(visible.size.toLong()))
+            append(" 条 · 崩溃 ")
+            append(ui.stats.crashes)
+            if (!logFile.isNullOrBlank()) {
+                // 别把「本会话有落盘文件」写成「正在写」：采集停了/暂停了，
+                // logFile 仍然非空，标注要跟着采集状态走
+                val writing = state is CaptureController.State.Capturing && !ui.paused
+                append(if (writing) " · 落盘中" else " · 已落盘")
+            }
+        }
+    )
+
+    ToolsBar(
+        presets = ui.presets,
+        activePreset = ui.activePreset,
+        onApplyPreset = { p ->
+            ui.activePreset = p.name
+            ui.query = p.query
+            ui.regex = p.regex
+            prefs.searchRegex = p.regex
+            ui.minPriority = p.minPriority
+            prefs.minLevelPriority = p.minPriority
+            ui.onlyCrash = p.onlyCrash
+            ui.onlyBookmarked = p.onlyBookmarked
+            ui.tagInclude = p.tagsInclude
+            ui.tagExclude = p.tagsExclude
+            ui.pidFilter = p.pids
+            prefs.filterTagsInclude = p.tagsInclude
+            prefs.filterTagsExclude = p.tagsExclude
+            prefs.filterPids = p.pids
+        },
+        onDeletePreset = { p ->
+            if (!p.builtin) {
+                ui.presets = PresetStore.remove(prefs, p.name)
+                if (ui.activePreset == p.name) ui.activePreset = null
+            }
+        },
+        onSaveCurrent = {
+            val name = buildString {
+                append(if (ui.query.isBlank()) "筛选" else ui.query.take(12))
+                if (ui.onlyCrash) append("·崩溃")
+                if (ui.onlyBookmarked) append("·书签")
+                if (ui.minPriority > 0) append("·")
+                    .append(LogLevel.entries.firstOrNull { it.priority == ui.minPriority }?.letter ?: "+")
+            }
+            val preset = FilterPreset(
+                name = name,
+                query = ui.query,
+                regex = ui.regex,
+                minPriority = ui.minPriority,
+                onlyCrash = ui.onlyCrash,
+                onlyBookmarked = ui.onlyBookmarked,
+                tagsInclude = ui.tagInclude,
+                tagsExclude = ui.tagExclude,
+                pids = ui.pidFilter
+            )
+            ui.presets = PresetStore.upsert(prefs, preset)
+            ui.activePreset = name
+            Toast.makeText(context, "已存为「$name」", Toast.LENGTH_SHORT).show()
+        },
+        highlightCount = ui.highlightRules.count { it.enabled },
+        onOpenHighlights = { ui.highlightOpen = true },
+        crashSummary = if (ui.crashCounts.first > 0) "崩溃 今日${ui.crashCounts.first}" else "崩溃归集",
+        onOpenCrashes = { ui.crashOpen = true },
+        findTotal = if (ui.query.isBlank()) 0 else visible.size,
+        onFindNext = {
+            if (visible.isNotEmpty()) {
+                ui.findCursor = (ui.findCursor + 1) % visible.size
+                scope.launch { runCatching { listState.scrollToItem(ui.findCursor) } }
+            }
+        },
+        issueSummary = if (issueHits.isEmpty()) "问题体检" else "问题体检 ${issueHits.size}",
+        onOpenIssues = { ui.issueOpen = true },
+        overlayOn = ui.overlayAlive,
+        onOpenOverlay = {
+            if (OverlayLogService.alive) {
+                OverlayLogService.stop(context)
+                ui.overlayAlive = false
+                Toast.makeText(context, "悬浮窗已关闭", Toast.LENGTH_SHORT).show()
+            } else if (!OverlayLogService.canDraw(context)) {
+                Toast.makeText(context, "先给「显示在其他应用上层」权限", Toast.LENGTH_LONG).show()
+                runCatching {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                    )
+                }
+            } else {
+                OverlayLogService.start(context)
+                ui.overlayAlive = true
+                Toast.makeText(context, "悬浮窗已开，可拖动", Toast.LENGTH_SHORT).show()
+            }
+        },
+        onOpenFile = {
+            if (OfflineLog.entries.isNotEmpty()) {
+                OfflineLog.clear()
+                Toast.makeText(context, "已回到实时日志", Toast.LENGTH_SHORT).show()
+            } else {
+                onOpenDoc()
+            }
+        },
+        onOpenHistory = {
+            ui.fileItems = LogFiles.list(context)
+            ui.filesOpen = true
+        },
+        onSnapshot = {
+            if (visible.isEmpty()) {
+                Toast.makeText(context, "没有可存的日志", Toast.LENGTH_SHORT).show()
+            } else {
+                Thread {
+                    val f = SnapshotImage.render(
+                        context,
+                        visible,
+                        prefs.lastLabel.ifBlank { "日志快照" }
+                    )
+                    Handler(Looper.getMainLooper()).post {
+                        if (f != null) {
+                            Toast.makeText(context, "已存图：${f.name}", Toast.LENGTH_LONG).show()
+                            runCatching { ExportFormats.shareFile(context, f, "image/png") }
+                        } else {
+                            Toast.makeText(context, "存图失败", Toast.LENGTH_SHORT).show()
                         }
                     }
+                }.start()
+            }
+        },
+        onOpenBuffers = { ui.buffersOpen = true },
+        bufferSummary = ui.bufferSet.joinToString("/") { it },
+        onOpenTags = { ui.tagsOpen = true },
+        selectMode = ui.selectMode,
+        selectCount = ui.picked.size,
+        bookmarkCount = remember(ui.bookmarkVersion) { Bookmarks.count() },
+        onClearMarks = {
+            Bookmarks.clear()
+            ui.bookmarkVersion++
+            Toast.makeText(context, "已清除全部收藏", Toast.LENGTH_SHORT).show()
+        },
+        onToggleSelect = {
+            ui.selectMode = !ui.selectMode
+            if (!ui.selectMode) ui.picked.clear()
+        }
+    )
+
+    if (OfflineLog.entries.isNotEmpty()) {
+        OfflineSourceBar(
+            name = OfflineLog.sourceName,
+            count = OfflineLog.entries.size,
+            onClose = { OfflineLog.clear() }
+        )
+    }
+
+    if (ui.advancedOpen) {
+        AdvancedFilterPanel(
+            tagInclude = ui.tagInclude,
+            onTagInclude = {
+                ui.tagInclude = it
+                prefs.filterTagsInclude = it
+            },
+            tagExclude = ui.tagExclude,
+            onTagExclude = {
+                ui.tagExclude = it
+                prefs.filterTagsExclude = it
+            },
+            pids = ui.pidFilter,
+            onPids = {
+                ui.pidFilter = it
+                prefs.filterPids = it
+            },
+            onReset = {
+                ui.query = ""
+                ui.regex = false
+                prefs.searchRegex = false
+                ui.minPriority = LogLevel.VERBOSE.priority
+                prefs.minLevelPriority = ui.minPriority
+                ui.onlyCrash = false
+                ui.onlyBookmarked = false
+                ui.tagInclude = ""
+                ui.tagExclude = ""
+                ui.pidFilter = ""
+                prefs.filterTagsInclude = ""
+                prefs.filterTagsExclude = ""
+                prefs.filterPids = ""
+            }
+        )
+    }
+}
+
+/** 列表上方的四条提示：跳转提示、暂停横幅、通道被拦、搜索历史。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LogNotices(
+    ui: LogScreenUi,
+    prefs: Prefs,
+    blocked: Boolean
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val colors = MaterialTheme.colorScheme
+    val palette = LocalLogPalette.current
+
+    ui.jumpHint?.let { hint ->
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            shape = RoundedCornerShape(10.dp),
+            color = palette.warn.copy(alpha = 0.14f),
+            contentColor = palette.warn
+        ) {
+            Text(
+                hint,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+    }
+
+    if (ui.paused) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            shape = RoundedCornerShape(10.dp),
+            color = palette.warn.copy(alpha = 0.12f),
+            contentColor = palette.warn
+        ) {
+            Text(
+                if (ui.heldCount > 0) {
+                    "已暂停采集，这期间新进来 ${fmt(ui.heldCount.toLong())} 条，点「继续」补齐"
+                } else {
+                    "已暂停采集 · 日志流已停，点「继续」恢复抓取"
+                },
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+        }
+    }
+
+    if (blocked) {
+        ChannelBlockedCard(
+            onDismiss = { CaptureController.dismissChannelBlocked() },
+            onOpenDialer = {
+                if (!DeviceLogGuard.openDialer(context)) {
+                    Exporter.copy(context, DeviceLogGuard.ENGINEER_CODE)
+                    Toast.makeText(
+                        context,
+                        "无法调起拨号盘，工程码已复制",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            },
+            onRaiseLevel = {
+                scope.launch {
+                    val r = withContext(Dispatchers.IO) { DeviceLogGuard.raiseLevel() }
+                    Toast.makeText(context, r, Toast.LENGTH_LONG).show()
+                }
+            }
+        )
+    }
+
+    if (ui.history.isNotEmpty()) {
+        HistoryChips(
+            history = ui.history.take(8),
+            onPick = { q ->
+                ui.query = q
+                ui.regex = false
+            },
+            onRemove = { q ->
+                prefs.dropQuery(q)
+                ui.history = prefs.queryHistory.split("\n").filter { it.isNotBlank() }
+            }
+        )
+        Spacer(Modifier.height(4.dp))
+    }
+}
+
+/** 日志列表（含小地图与空态）。ColumnScope 扩展：里面要用 weight(1f) 吃掉剩余高度。 */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ColumnScope.LogListArea(
+    ui: LogScreenUi,
+    visible: List<LogEntry>,
+    displayRows: List<LogRowItem>,
+    compiled: CompiledFilter,
+    highlighter: CompiledHighlights,
+    listState: LazyListState,
+    prefs: Prefs,
+    blocked: Boolean
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val colors = MaterialTheme.colorScheme
+    val palette = LocalLogPalette.current
+
+    val highlightCrash = prefs.highlightCrash
+    val compact = prefs.compactRows
+    val showTime = prefs.showTime
+    val showPid = prefs.showPid
+    val fontSize = prefs.fontSize
+    val showMinimap = prefs.showMinimap
+
+    Spacer(Modifier.height(4.dp))
+
+    Box(Modifier.weight(1f)) {
+        if (visible.isEmpty()) {
+            EmptyLogs(
+                blocked = blocked,
+                hasAny = ui.items.isNotEmpty(),
+                onlyBookmarked = ui.onlyBookmarked
+            )
+        } else {
+            Row(Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    reverseLayout = true,
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp)
+                ) {
+                    items(items = displayRows, key = { it.key }) { row ->
+                        when (row) {
+                            is LogRowItem.One -> {
+                                val entry = row.entry
+                                val bookmarked = Bookmarks.has(entry.id)
+                                LogRow(
+                                    entry = entry,
+                                    highlightCrash = highlightCrash,
+                                    compact = compact,
+                                    showTime = showTime,
+                                    showPid = showPid,
+                                    fontSize = fontSize,
+                                    bookmarked = bookmarked,
+                                    flashed = entry.id == ui.jumpFlash,
+                                    compiled = compiled,
+                                    highlighter = highlighter,
+                                    queryColor = palette.warn,
+                                    selectMode = ui.selectMode,
+                                    selected = entry.id in ui.picked,
+                                    onToggleSelect = {
+                                        if (entry.id in ui.picked) ui.picked.remove(entry.id)
+                                        else ui.picked.add(entry.id)
+                                    },
+                                    onMenu = { ui.actionEntry = entry },
+                                    onCopy = {
+                                        Exporter.copy(context, Exporter.formatEntry(entry))
+                                        Toast.makeText(context, "已复制该行", Toast.LENGTH_SHORT).show()
+                                    },
+                                    onBookmark = {
+                                        val added = Bookmarks.toggle(entry)
+                                        // 取消收藏后触发器必须递增，否则「只看书签」视图不会刷新
+                                        ui.bookmarkVersion++
+                                        Toast.makeText(
+                                            context,
+                                            if (added) "已收藏该行" else "已取消收藏",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                )
+                            }
+
+                            is LogRowItem.Fold -> {
+                                FoldRow(
+                                    count = row.count,
+                                    kind = row.kind,
+                                    head = row.head,
+                                    expanded = row.expandKey in ui.expandedFolds,
+                                    onToggle = {
+                                        ui.expandedFolds = if (row.expandKey in ui.expandedFolds) {
+                                            ui.expandedFolds - row.expandKey
+                                        } else {
+                                            ui.expandedFolds + row.expandKey
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                if (showMinimap) {
+                    MinimapBar(
+                        rows = visible,
+                        onSeek = { ratio ->
+                            // ratio 0 = 小地图顶部 = 最旧的一条。
+                            // reverseLayout 下 index 0 在底部（最新），所以取反；
+                            // 下标也必须按实际渲染的 displayRows 算（折叠后条数不同）。
+                            val last = displayRows.size - 1
+                            val idx = ((1f - ratio) * last).toInt().coerceIn(0, last)
+                            scope.launch { runCatching { listState.scrollToItem(idx) } }
+                        },
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .padding(top = 4.dp, bottom = 8.dp, end = 2.dp)
+                    )
                 }
             }
         }
     }
+}
 
-    if (exportOpen) {
+/** 八个弹窗：单行菜单、tag 统计、历史文件、缓冲区、问题体检、导出、高亮规则、崩溃归集。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LogDialogs(
+    ui: LogScreenUi,
+    prefs: Prefs,
+    visible: List<LogEntry>,
+    targetPkg: String,
+    issueHits: List<IssueHit>,
+    onJump: (LogEntry) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    ui.actionEntry?.let { entry ->
+        EntryActionsDialog(
+            title = "${entry.level.letter}/${entry.tag}",
+            bookmarked = Bookmarks.has(entry.id),
+            onCopy = {
+                Exporter.copy(context, Exporter.formatEntry(entry))
+                Toast.makeText(context, "已复制该行", Toast.LENGTH_SHORT).show()
+            },
+            onShare = { Exporter.shareText(context, Exporter.formatEntry(entry)) },
+            onBookmark = {
+                Bookmarks.toggle(entry)
+                ui.bookmarkVersion++
+            },
+            onFilterTag = {
+                ui.query = "tag:${entry.tag}"
+                ui.regex = false
+            },
+            onFilterPid = {
+                ui.query = "pid:${entry.pid}"
+                ui.regex = false
+            },
+            onDismiss = { ui.actionEntry = null }
+        )
+    }
+
+    if (ui.tagsOpen) {
+        val counts = remember(visible, ui.tagsOpen) {
+            visible.groupingBy { it.tag }.eachCount().entries
+                .sortedByDescending { it.value }
+                .take(40)
+                .map { it.key to it.value }
+        }
+        TagStatsDialog(
+            tags = counts,
+            total = visible.size,
+            onPick = { tag ->
+                ui.tagsOpen = false
+                ui.query = "tag:$tag"
+                ui.regex = false
+            },
+            onDismiss = { ui.tagsOpen = false }
+        )
+    }
+
+    if (ui.filesOpen) {
+        LogFilesDialog(
+            items = ui.fileItems,
+            onOpen = { item ->
+                // 直接回放：以前点历史文件交给系统 ACTION_VIEW，会弹「打开方式」把日志踢出 App。
+                // 这里内部解析后进离线视图，过滤与搜索照常可用。
+                Thread {
+                    val parsed = runCatching {
+                        OfflineImport.parse(item.file.readText())
+                    }.getOrDefault(emptyList())
+                    Handler(Looper.getMainLooper()).post {
+                        if (parsed.isEmpty()) {
+                            Toast.makeText(context, "读不出内容，确认是 logcat 文本", Toast.LENGTH_SHORT)
+                                .show()
+                        } else {
+                            OfflineLog.load(parsed, item.name)
+                            ui.filesOpen = false
+                            Toast.makeText(
+                                context,
+                                "已回放 ${item.name}（${parsed.size} 行）",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }.start()
+            },
+            onShare = { item -> runCatching { LogFiles.share(context, item) } },
+            onDelete = { item ->
+                if (LogFiles.remove(item)) {
+                    ui.fileItems = LogFiles.list(context)
+                    Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { ui.filesOpen = false }
+        )
+    }
+
+    if (ui.buffersOpen) {
+        BufferDialog(
+            selected = ui.bufferSet,
+            onToggle = { key ->
+                val next = if (ui.bufferSet.contains(key)) ui.bufferSet - key else ui.bufferSet + key
+                if (next.isEmpty()) {
+                    Toast.makeText(context, "至少留一个缓冲区", Toast.LENGTH_SHORT).show()
+                } else {
+                    ui.bufferSet = next
+                    prefs.buffers = next.joinToString(",")
+                    Toast.makeText(context, "改完重启抓取生效", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { ui.buffersOpen = false },
+            onClearDevice = {
+                Thread {
+                    val r = dev.loglens.shizuku.ShellRunner.exec("logcat -b all -c")
+                    Handler(Looper.getMainLooper()).post {
+                        Toast.makeText(
+                            context,
+                            if (r.code == 0) "设备日志缓冲已清空" else "清空失败：${r.stderr.take(60)}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }.start()
+            }
+        )
+    }
+
+    if (ui.issueOpen) {
+        IssueDialog(
+            hits = issueHits,
+            onJump = { hit ->
+                ui.issueOpen = false
+                onJump(hit.sample)
+            },
+            onDismiss = { ui.issueOpen = false }
+        )
+    }
+
+    if (ui.exportOpen) {
         ExportDialog(
-            format = exportFormat,
+            format = ui.exportFormat,
             onFormat = {
-                exportFormat = it
+                ui.exportFormat = it
                 prefs.exportFormat = it.id
             },
-            onDismiss = { exportOpen = false },
+            onDismiss = { ui.exportOpen = false },
             onExport = {
-                exportOpen = false
+                ui.exportOpen = false
                 scope.launch {
                     // 导出跟随当前筛选：以前不管怎么筛都导全量，导出来的根本不是眼前这份
                     val data = withContext(Dispatchers.IO) { visible.asReversed() }
@@ -1181,7 +1369,7 @@ fun LogScreen(
                         return@launch
                     }
                     val file = withContext(Dispatchers.IO) {
-                        ExportFormats.export(context, data, targetPkg, exportFormat)
+                        ExportFormats.export(context, data, targetPkg, ui.exportFormat)
                     }
                     Toast.makeText(
                         context,
@@ -1191,7 +1379,7 @@ fun LogScreen(
                 }
             },
             onShare = {
-                exportOpen = false
+                ui.exportOpen = false
                 scope.launch {
                     // 导出跟随当前筛选：以前不管怎么筛都导全量，导出来的根本不是眼前这份
                     val data = withContext(Dispatchers.IO) { visible.asReversed() }
@@ -1200,11 +1388,11 @@ fun LogScreen(
                         return@launch
                     }
                     val file = withContext(Dispatchers.IO) {
-                        ExportFormats.export(context, data, targetPkg, exportFormat)
+                        ExportFormats.export(context, data, targetPkg, ui.exportFormat)
                     }
                     if (file != null) {
                         runCatching {
-                            ExportFormats.shareFile(context, file, exportFormat.mime)
+                            ExportFormats.shareFile(context, file, ui.exportFormat.mime)
                         }
                     } else {
                         Toast.makeText(context, "分享失败", Toast.LENGTH_SHORT).show()
@@ -1214,40 +1402,39 @@ fun LogScreen(
         )
     }
 
-    if (highlightOpen) {
+    if (ui.highlightOpen) {
         HighlightRulesDialog(
-            rules = highlightRules,
+            rules = ui.highlightRules,
             onSave = {
-                highlightRules = it
+                ui.highlightRules = it
                 HighlightStore.save(prefs, it)
             },
-            onDismiss = { highlightOpen = false }
+            onDismiss = { ui.highlightOpen = false }
         )
     }
 
-    if (crashOpen) {
+    if (ui.crashOpen) {
         CrashStatsDialog(
-            rows = crashRows,
-            todayCount = crashCounts.first,
-            weekCount = crashCounts.second,
-            totalCount = crashCounts.third,
+            rows = ui.crashRows,
+            todayCount = ui.crashCounts.first,
+            weekCount = ui.crashCounts.second,
+            totalCount = ui.crashCounts.third,
             onClear = {
                 CrashStats.clear(prefs)
-                crashRows = emptyList()
-                crashCounts = Triple(0, 0, 0)
+                ui.crashRows = emptyList()
+                ui.crashCounts = Triple(0, 0, 0)
             },
             onJump = { agg ->
                 // 跳到列表里第一条同签名日志
-                crashOpen = false
+                ui.crashOpen = false
                 val target = visible.firstOrNull { it.message == agg.sample }
-                if (target != null) jumpToEntry(target)
+                if (target != null) onJump(target)
                 else Toast.makeText(context, "该崩溃不在当前视图内", Toast.LENGTH_SHORT).show()
             },
-            onDismiss = { crashOpen = false }
+            onDismiss = { ui.crashOpen = false }
         )
     }
 }
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FilterSection(

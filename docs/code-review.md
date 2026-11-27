@@ -117,6 +117,8 @@
 
 ## 二、建议修复但未动
 
+> 行号是 2026-11 评审当时的快照。`ui/LogScreen.kt` 在之后做过一次拆分（1086 行巨型 composable → `LogScreenUi` 状态容器 + 顶栏/底栏/筛选区/提示区/列表/弹窗六个子 composable），该文件的行号已整体位移，下面按 `LogScreen.kt:NNN` 的引用只保证文件存在且行号在范围内，定位请按同一行给出的标识符/函数名检索。其余文件未动，行号仍然准确。
+
 以下问题均能在代码中直接定位，但要么会改变用户可见的界面/交互（本工单没有 `emulator-5560`，也没有在真机上构造完整采集链路；UI 行为只验证了权限弹窗这一种状态），要么需要跨模块设计取舍，因此没有直接改代码。
 
 ### 高优先级（功能实质性失效）
@@ -166,10 +168,10 @@
 ### lint 相关（当时剩 3 条未改，后续已全部修掉）
 
 - `CaptureService.kt` 的 `MetricStyle`/`ProgressStyle` 调用在 `if (SDK_INT >= 36/37)` 分支内，lint 不做跨函数守卫分析；已给三个 helper 加 `@android.annotation.TargetApi(36/37)` 说明调用前提，17 条 NewApi 全部消警，运行时行为未变。
-- `res/values/strings.xml:4-5` 的两条通知渠道文案没有 `values-en` 翻译（`MissingTranslation`）；应用 UI 本身是中文，补翻译会引出“是否要整体国际化”的产品决定。
+- `res/values/strings.xml:4-5` 的两条通知渠道文案（`MissingTranslation`）——当时为了消警给 `values-en` 补了英文，但界面本身是 800 多处硬编码中文，补 3 条英文等于假装支持国际化。最终处理是删掉 `values-en`，不再维持空壳（见 172 行后记）。
 - `ui/NetScreen.kt:348` 在 Composable 里读 `Locale.getDefault()`（`NonObservableLocale`）；应改用 `LocalConfiguration`/`LocalLocale`，属于 Compose 规范问题，不影响当前中文界面。
 
-> 后记：以上 3 条已在后续提交修掉——`values-en/strings.xml` 补了 `capture_channel_name` / `capture_channel_desc` 两条英文文案；`NetScreen` 改用 `LocalConfiguration.current.locales[0]`；两处 `PackageInfo.longVersionCode`（API 28+，minSdk 26）统一走 `dev/loglens/util/AppVersion.kt` 的 `versionCodeCompat()`，26/27 退回 `versionCode`。现在 `lintDebug` 是 0 error（warning 数随本机与 CI 的 lint 版本略有浮动，本机 91、CI 93），并已进 CI 闸门。
+> 后记：以上 3 条已在后续提交处理——`MissingTranslation` 这条最终没有走「补英文」而是**删掉 `values-en` 目录**：界面只有中文一套，留 3 条英文只会让人以为支持英文，`res/values/strings.xml` 顶部已写注释说明「真要做国际化再把文案搬进去」；`NetScreen` 改用 `LocalConfiguration.current.locales[0]`；两处 `PackageInfo.longVersionCode`（API 28+，minSdk 26）统一走 `dev/loglens/util/AppVersion.kt` 的 `versionCodeCompat()`，26/27 退回 `versionCode`。现在 `lintDebug` 是 0 error（warning 数随本机与 CI 的 lint 版本略有浮动，本机 90、CI 93），并已进 CI 闸门。
 
 ## 三、已检查无问题
 
@@ -186,10 +188,7 @@
 
 ## 附：lint 结果
 
-修复后 `gradlew.bat lintDebug --offline --no-build-cache`：**3 errors / 89 warnings / 12 hints**（基线 21 / 92 / 12）。剩余的 3 个 error：
-
-- `app/src/main/res/values/strings.xml:4-5`：`MissingTranslation`，通知渠道名称/描述没有 `values-en` 翻译。应用 UI 本身是中文，补翻译涉及“是否整体国际化”的产品决定，本次未动。
-- `app/src/main/java/dev/loglens/ui/NetScreen.kt:348`：`NonObservableLocale`，Composable 里读 `Locale.getDefault()`；应改用 `LocalConfiguration`/`LocalLocale`，不影响当前中文界面，本次未动。
+修复后 `gradlew.bat lintDebug --offline --no-build-cache`：**0 errors / 90 warnings / 11 hints**（基线 21 / 92 / 12）。两条 `MissingTranslation` 的处理方式见上：删掉 `values-en` 空壳，界面只保留中文一套文案（`res/values/strings.xml` 顶部有注释，避免再建空语言目录）；`NetScreen` 的 `NonObservableLocale` 已改用 `LocalConfiguration.current.locales[0]`。
 
 基线里的 17 条 `NewApi`（`MetricStyle`/`ProgressStyle`/语义常量）已通过 `@android.annotation.TargetApi(36/37)` 标注说明“只在 guarded 分支调用”而消警；其中真实存在的 API 36.1 守卫错误（`setRequestPromotedOngoing`）已经改代码修复，不是单纯消警。
 
