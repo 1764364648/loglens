@@ -1,61 +1,63 @@
 #!/usr/bin/env python3
-"""LogLens PR 审计：合并前自动查一遍「这个 PR 有没有偷偷加东西」。
+"""LogLens PR 审计：合并前把这个 PR 的 diff 从头到尾过一遍。
 
-只看 diff 的文本，不执行 PR 里的任何代码。两种用法：
+只读 diff 文本，不执行 PR 里的任何代码、不 checkout PR、不加载 PR 的任何东西。
 
-    python tools/pr_audit.py --pr 12                  # 查 GitHub 上的 PR（需要 gh 登录或 GITHUB_TOKEN）
-    python tools/pr_audit.py --range origin/main..HEAD  # 查本地还没推的分支
+    python tools/pr_audit.py --pr 12                     # 查线上 PR（需要 gh 登录或 GITHUB_TOKEN）
+    python tools/pr_audit.py --range origin/main..HEAD   # 查本地分支
 
-退出码：0 = 没有阻断项；1 = 有阻断项，别合。
-
-阻断项代表「这个项目本来不该出现的东西」：联网能力、新权限、新依赖、新仓库、
-动构建脚本与签名、二进制文件、动 wrapper 与校验文件、大段 base64。
-其余可疑但可能是误伤的（exec、Class.forName、URL 字面量）只做人工确认提示。
+退出码：0 没有阻断项；1 有阻断项（main 上的分支保护会拒绝合并）。
+规则来源见 security/audit-rules.md。
 """
 import argparse
-import base64
 import json
 import os
 import re
 import subprocess
 import sys
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
-SEV_BLOCK = "阻断"
-SEV_WARN = "需人工确认"
+BLOCK = "阻断"
+WARN = "需人工确认"
 
-# 这个 App 不联网，所以下列能力出现即阻断（不看上下文）
-NETWORK_PATTERNS = [
-    (r"HttpURLConnection", "JDK 原生 HTTP"),
-    (r"\bokhttp3?\b", "OkHttp"),
-    (r"java\.net\.(?:Socket|URL|HttpURLConnection|InetAddress|DatagramSocket)", "java.net 网络类"),
-    (r"\bWebView\b", "WebView"),
-    (r"\bRetrofit\b|\bKtor\b|\bFuel\b", "HTTP 客户端库"),
-    (r"libcore\.io\.IoBridge", "底层 socket"),
-]
-TELEMETRY_PATTERNS = [
-    (r"\bFirebase\b|\bCrashlytics\b|\bSentry\b|\bBugly\b|\bUmeng\b|\bAppsflyer\b", "第三方统计/崩溃上报 SDK"),
-    (r"Telemetry|telemetry", "自命名上报"),
-]
-# 这些可能是既有合法用法（本仓库用 exec 拉 logcat），只提示
-RISKY_PATTERNS = [
-    (r"Runtime\.getRuntime\(\)\.exec|\bProcessBuilder\b", "起子进程"),
-    (r"\bsu\s+-c\b|/system/bin/su\b|/system/xbin/su\b", "调 su"),
-    (r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader|System\.loadLibrary", "动态加载代码"),
-    (r"Class\.forName", "反射加载类"),
-    (r"Base64\.decode|Base64\.Default\.decode", "Base64 解码"),
-    (r"https?://[^\s\"')]+", "硬编码 URL"),
+CAT_REPO = "仓库结构与供应链文件"
+CAT_PATH = "文件名与路径"
+CAT_BIN = "二进制与伪装文件"
+CAT_MANIFEST = "AndroidManifest 权限与组件"
+CAT_BUILD = "构建脚本与依赖"
+CAT_NET = "网络与通信"
+CAT_TELEM = "上报与遥测"
+CAT_EXEC = "动态加载与命令执行"
+CAT_DATA = "数据访问与敏感能力"
+CAT_PERSIST = "持久化与后台常驻"
+CAT_OBF = "混淆、编码与不可见字符"
+CAT_SECRET = "疑似密钥与凭据"
+CAT_META = "PR 元信息"
+CAT_GRAPH = "提交级检查"
+
+CATEGORIES = [
+    CAT_REPO, CAT_PATH, CAT_BIN, CAT_MANIFEST, CAT_BUILD,
+    CAT_NET, CAT_TELEM, CAT_EXEC, CAT_DATA, CAT_PERSIST,
+    CAT_OBF, CAT_SECRET, CAT_META, CAT_GRAPH,
 ]
 
 BIN_EXTS = {
     ".jar", ".aar", ".apk", ".aab", ".dex", ".so", ".dll", ".exe", ".bin",
-    ".class", ".jks", ".keystore", ".p12", ".pfx", ".zip", ".7z", ".tar",
-    ".gz", ".wasm", ".dylib", ".msi", ".scr", ".pyc",
+    ".class", ".jks", ".keystore", ".p12", ".pfx", ".zip", ".7z", ".rar",
+    ".tar", ".gz", ".bz2", ".xz", ".wasm", ".dylib", ".msi", ".scr", ".pyc",
+    ".img", ".iso", ".dmg", ".cab", ".dat", ".pak",
 }
+CODE_EXTS = {
+    ".kt", ".java", ".kts", ".gradle", ".xml", ".pro", ".toml",
+    ".properties", ".py", ".sh", ".bash", ".yml", ".yaml",
+}
+SCRIPT_EXTS = {".sh", ".bash", ".ps1", ".bat", ".cmd", ".py", ".zsh", ".fish"}
+OTHER_ECOSYSTEM = re.compile(
+    r"(^|/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|"
+    r"Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|requirements\.txt|Pipfile|pyproject\.toml)$"
+)
 
-# 仓库现在声明的权限，新增任意一个都要阻断
 ALLOWED_PERMISSIONS = {
     "android.permission.QUERY_ALL_PACKAGES",
     "android.permission.PACKAGE_USAGE_STATS",
@@ -67,16 +69,393 @@ ALLOWED_PERMISSIONS = {
     "android.permission.SYSTEM_ALERT_WINDOW",
 }
 
-DEP_LINE = re.compile(
-    r"^\s*(implementation|api|debugImplementation|releaseImplementation|runtimeOnly|"
-    r"compileOnly|ksp|kapt|annotationProcessor|testImplementation)\s*\(?\s*[\"']([^\"']+)[\"']"
-)
-COORD = re.compile(r"^([A-Za-z0-9_.\-]+:[A-Za-z0-9_.\-]+)")
+DENY_PATHS = [
+    (r"^\.github/(workflows|actions)/", CAT_REPO, "改动了 CI 工作流 / action", "工作流能直接拿到令牌，必须维护者单独处理"),
+    (r"(^|/)CODEOWNERS$", CAT_REPO, "改动了 CODEOWNERS", "这是审查豁免的门闩"),
+    (r"^gradle/wrapper/", CAT_REPO, "改动了 Gradle Wrapper", "wrapper 决定构建器本身"),
+    (r"(^|/)gradlew(\.bat)?$", CAT_REPO, "改动了 gradlew 启动脚本", "构建入口脚本被注入过有先例"),
+    (r"^keystore/|\.jks$|\.keystore$|^keystore\.properties$|^local\.properties$", CAT_REPO, "碰到签名材料或本机配置", ""),
+    (r"verification-metadata\.xml$", CAT_REPO, "改动了依赖校验清单", "新增/替换依赖必须维护者本地重生成"),
+    (r"(^|/)\.gitmodules$", CAT_REPO, "引入了 git submodule", "子模块 = 未经审查的外部代码"),
+    (r"^(buildSrc|gradle/conventions)/", CAT_REPO, "引入了构建逻辑目录", "构建逻辑能以守护进程身份执行任意代码"),
+    (r"^(\.devcontainer|\.vscode|\.idea)/|^Dockerfile$|^docker-compose|\.pre-commit-config", CAT_REPO, "改动开发环境/钩子配置", "打开仓库时可能自动执行"),
+    (r"^tools/pr_audit\.py$", CAT_REPO, "改动了审计脚本自身", "闸门不能自己给自己开口子"),
+]
+WARN_PATHS = [
+    (r"^\.github/ISSUE_TEMPLATE/", CAT_REPO, "改动了 issue 表单", "表单会把恶意链接直接送到维护者眼前"),
+    (r"^security/dependency-allowlist\.txt$", CAT_REPO, "改动依赖白名单", "任何新增都要维护者确认"),
+    (r"^app/proguard-rules\.pro$", CAT_BUILD, "改动了混淆规则", ""),
+    (r"^gradle\.properties$", CAT_BUILD, "改动了 gradle.properties", "可能改构建器参数，如 jvmArgs"),
+    (r"^\.gitattributes$|^\.gitignore$", CAT_REPO, "改动仓库属性/忽略项", ""),
+]
+
+CODE_RULES = [
+    (CAT_NET, BLOCK, r"HttpURLConnection|\bokhttp3?\b|\bRetrofit\b|\bKtor\b|\bFuel\b|\bVolley\b|"
+                      r"java\.net\.|URLConnection|openConnection|\bURL\s*\(|SSLSocket|DatagramSocket|SocketChannel|WebSocket|"
+                      r"InetAddress|getByName\(|SSLContext", "网络通信 API"),
+    (CAT_NET, BLOCK, r"\bWebView\b|loadUrl\(|evaluateJavascript|WebViewClient", "WebView"),
+    (CAT_TELEM, BLOCK, r"Firebase|Crashlytics|Sentry|Bugly|Umeng|Appsflyer|AppMetrica|Adjust|"
+                       r"getAdvertisingId|oaid|openudid|installReferrer|trackEvent", "第三方统计/上报"),
+    (CAT_EXEC, BLOCK, r"DexClassLoader|PathClassLoader|InMemoryDexClassLoader|BaseDexClassLoader|loadDex\(",
+     "动态加载 dex"),
+    (CAT_EXEC, BLOCK, r"\bpm install\b|cmd package install|\bsettings put\b|/system/bin/su|/system/xbin/su|"
+                      r"\bsu\s+-c\b", "提权/静默装包命令"),
+    (CAT_EXEC, WARN, r"Runtime\.getRuntime\(\)\.exec|\bProcessBuilder\b|\.exec\(", "起子进程"),
+    (CAT_EXEC, WARN, r"System\.loadLibrary|System\.load\(", "加载 native 库"),
+    (CAT_EXEC, WARN, r"Class\.forName|setAccessible\(|MethodHandles", "反射"),
+    (CAT_DATA, BLOCK, r"ContactsContract|SmsManager|TelephonyManager|CallLog|content://sms|"
+                      r"MediaStore\.Audio|READ_CONTACTS|READ_SMS", "通讯录/短信访问"),
+    (CAT_DATA, WARN, r"LocationManager|FusedLocationProvider|CameraManager|SensorManager|"
+                     r"ClipboardManager|AccountManager", "定位/相机/剪贴板/账号"),
+    (CAT_PERSIST, WARN, r"AlarmManager|JobScheduler|WorkManager|setExactAndAllowWhileIdle|"
+                        r"setPeriodic\(|PeriodicWorkRequest", "后台常驻调度"),
+    (CAT_OBF, BLOCK, r"[A-Za-z0-9+/]{180,}={0,2}", "大段 Base64"),
+    (CAT_OBF, BLOCK, r"\b(?:[0-9a-fA-F]{2}){80,}\b", "大段十六进制"),
+    (CAT_OBF, WARN, r"\\x[0-9a-fA-F]{2}(?:\\x[0-9a-fA-F]{2}){8,}", "长串转义字节"),
+]
+SECRET_PAT = (r"(?i)(aws_secret_access_key|ghp_[A-Za-z0-9]{20,}|github_pat_|AKIA[0-9A-Z]{16}|"
+              r"-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[bap]-|AIza[0-9A-Za-z_\-]{30,}|sk-[A-Za-z0-9]{20,})")
+
+BIDI_CHARS = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c"
+INVISIBLE = "\u200b\u200c\u200d\u2060\ufeff\u00ad"
+CYRILLIC_GREEK = re.compile(r"[\u0400-\u04FF\u0370-\u03FF]")
+CJK = re.compile(r"[\u4e00-\u9fff]")
+CMD_IN_NAME = re.compile(r"[`$]|\$\{IFS\}|\|\||&&|;|\||>|<|\|\s*sh\b")
+
+def coords_allowlist(root="."):
+    path = Path(root) / "security" / "dependency-allowlist.txt"
+    if not path.exists():
+        return set()
+    out = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^([A-Za-z0-9_.\-]+:[A-Za-z0-9_.\-]+)", line)
+        out.add(m.group(1) if m else line)
+    return out
 
 
-def die(msg, code=2):
-    print(msg, file=sys.stderr)
-    sys.exit(code)
+def edit_distance(a, b, cap=3):
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+        prev = cur
+    return prev[-1]
+
+
+def added_lines(patch):
+    out = []
+    for raw in (patch or "").splitlines():
+        if raw.startswith("+++") or raw.startswith("---"):
+            continue
+        if raw.startswith("+"):
+            out.append(raw[1:])
+    return out
+
+
+def removed_lines(patch):
+    out = []
+    for raw in (patch or "").splitlines():
+        if raw.startswith("---"):
+            continue
+        if raw.startswith("-"):
+            out.append(raw[1:])
+    return out
+
+
+class Finding:
+    def __init__(self, cat, sev, title, detail):
+        self.cat = cat
+        self.sev = sev
+        self.title = title
+        self.detail = detail
+
+    def key(self):
+        return (self.cat, self.sev, self.title, self.detail)
+
+
+def audit_file(entry, allow, findings):
+    """检查单个文件。entry 需要 filename / status / patch。"""
+    path = entry.get("filename") or ""
+    status = entry.get("status", "modified")
+    patch = entry.get("patch") or ""
+    low = path.lower()
+    ext = Path(low).suffix
+    add = added_lines(patch)
+    drop = removed_lines(patch)
+
+    # 测试夹具与规则说明里本来就写着各种危险样例，这些文件里只降级不阻断
+    meta_soft = bool(re.match(r"(^|/)(test_pr_audit\.py|audit-rules\.md)$", path))
+
+    def add_f(cat, sev, title, detail=""):
+        if meta_soft and sev == BLOCK and cat in (
+                CAT_NET, CAT_TELEM, CAT_EXEC, CAT_DATA, CAT_PERSIST, CAT_OBF, CAT_SECRET):
+            title = "样例文件里的危险写法：" + title
+            sev = WARN
+        findings.append(Finding(cat, sev, title, detail))
+
+    # 1) 路径黑名单
+    for pat, cat, title, note in DENY_PATHS:
+        if re.search(pat, path):
+            add_f(cat, BLOCK, title, f"`{path}`" + (f" —— {note}" if note else ""))
+    for pat, cat, title, note in WARN_PATHS:
+        if re.search(pat, path):
+            add_f(cat, WARN, title, f"`{path}`" + (f" —— {note}" if note else ""))
+
+    if OTHER_ECOSYSTEM.search(path):
+        add_f(CAT_REPO, BLOCK, "引入别的包管理生态", f"`{path}` —— 新生态等于新的安装时执行链")
+
+    # 2) 文件名/路径攻击
+    if ".." in path or path.startswith("/") or "\\" in path:
+        add_f(CAT_PATH, BLOCK, "路径穿越", f"`{path}`")
+    if CMD_IN_NAME.search(path):
+        add_f(CAT_PATH, BLOCK, "文件名带命令注入字符", f"`{path}`")
+    if any(ch in path for ch in BIDI_CHARS) or any(ch in path for ch in INVISIBLE):
+        add_f(CAT_PATH, BLOCK, "文件名含不可见/双向控制字符", f"`{path}`")
+    if CYRILLIC_GREEK.search(path):
+        add_f(CAT_PATH, BLOCK, "文件名含西里尔/希腊同形字符", f"`{path}`")
+
+    # 3) 二进制与资源
+    if ext in BIN_EXTS:
+        add_f(CAT_BIN, BLOCK, "提交了二进制/压缩包", f"`{path}` —— diff 里没法审内容")
+    if ext in SCRIPT_EXTS and status == "added":
+        add_f(CAT_REPO, WARN, "新增可执行脚本", f"`{path}` —— 本仓库原本没有脚本，确认它要做什么")
+    if re.search(r"(^|/)src/main/(assets|res/raw|jniLibs)/", path) and status == "added":
+        add_f(CAT_BIN, WARN, "新增资源文件", f"`{path}` —— 资源同样能被加载执行，确认来源")
+
+    # 4) Manifest
+    if low.endswith("androidmanifest.xml"):
+        for ln in add:
+            for perm in re.findall(r"android\.permission\.([A-Z_0-9]+)", ln):
+                full = "android.permission." + perm
+                if full not in ALLOWED_PERMISSIONS:
+                    add_f(CAT_MANIFEST, BLOCK, "新增权限", f"`{path}` 新增 `{full}`")
+            if re.search(r"android:exported\s*=\s*\"true\"", ln):
+                add_f(CAT_MANIFEST, BLOCK, "组件导出", f"`{ln.strip()[:100]}` —— 任意应用可拉起")
+            if re.search(r"android:debuggable\s*=\s*\"true\"", ln):
+                add_f(CAT_MANIFEST, BLOCK, "开启 debuggable", f"`{ln.strip()[:100]}`")
+            if re.search(r"usesCleartextTraffic\s*=\s*\"true\"|networkSecurityConfig", ln):
+                add_f(CAT_MANIFEST, BLOCK, "放开明文/网络安全配置", f"`{ln.strip()[:100]}`")
+            if re.search(r"android:sharedUserId", ln):
+                add_f(CAT_MANIFEST, BLOCK, "声明 sharedUserId", f"`{ln.strip()[:100]}`")
+            if re.search(r"tools:node\s*=\s*\"(replace|remove)\"", ln):
+                add_f(CAT_MANIFEST, BLOCK, "清单节点替换/删除", f"`{ln.strip()[:100]}` —— 常用来自顶父级约束")
+            if re.search(r"BOOT_COMPLETED|RECEIVE_BOOT_COMPLETED", ln):
+                add_f(CAT_PERSIST, BLOCK, "开机自启", f"`{ln.strip()[:100]}`")
+            if re.search(r"AccessibilityService|DeviceAdmin|NotificationListenerService|"
+                         r"VpnService|InputMethodService|MediaProjection", ln):
+                add_f(CAT_DATA, BLOCK, "高权限系统服务", f"`{ln.strip()[:100]}` —— 能读全屏/通知/按键")
+            if re.search(r"<(receiver|service|provider|activity)\b|<intent-filter", ln):
+                add_f(CAT_MANIFEST, WARN, "新增组件/意图过滤", f"`{ln.strip()[:100]}`")
+            if re.search(r"android:process\s*=", ln):
+                add_f(CAT_PERSIST, WARN, "独立进程", f"`{ln.strip()[:100]}`")
+            if re.search(r"<queries", ln):
+                add_f(CAT_MANIFEST, WARN, "扩大可见包范围", f"`{ln.strip()[:100]}`")
+
+    # 5) 构建脚本
+    if low.endswith((".gradle", ".gradle.kts")) or low.endswith("libs.versions.toml"):
+        for ln in add:
+            if re.search(r"maven\s*\(\s*[\"']|mavenCentral\(\)|google\(\)|gradlePluginPortal|"
+                         r"jitpack|mavenLocal\(\)|flatDir|ivy\s*\{|exclusiveContent", ln):
+                add_f(CAT_BUILD, BLOCK, "新增/改动仓库源", f"`{ln.strip()[:100]}`（{path}）")
+            if re.search(r"buildscript\s*\{|apply\(plugin|apply plugin", ln):
+                add_f(CAT_BUILD, BLOCK, "注入构建脚本/插件", f"`{ln.strip()[:100]}`")
+            if re.search(r"resolutionStrategy|dependencySubstitution|eachDependency|force\s*\(|"
+                         r"capabilities|componentSelection|substitute\(", ln):
+                add_f(CAT_BUILD, BLOCK, "替换/劫持依赖解析", f"`{ln.strip()[:100]}` —— 可把可信坐标换成任意构件")
+            if re.search(r"commandLine|providers\.exec|\bexec\s*\{|ProcessBuilder|Runtime\.|"
+                         r"System\.exec|gradle\.startParameter", ln):
+                add_f(CAT_BUILD, BLOCK, "构建期执行外部命令", f"`{ln.strip()[:100]}` —— 在本机以你的身份跑")
+            if re.search(r"signingConfig|storeFile|storePassword|keyAlias|keyPassword|"
+                         r"applicationId|namespace", ln):
+                add_f(CAT_BUILD, BLOCK, "改动签名/应用标识", f"`{ln.strip()[:100]}`")
+            if re.search(r"^\s*(classpath|id\s*\(|id\s+\")", ln) and "version" in ln:
+                add_f(CAT_BUILD, BLOCK, "新增构建插件", f"`{ln.strip()[:100]}`")
+            if re.search(r"isMinifyEnabled\s*=\s*false|minifyEnabled\s*false|isShrinkResources\s*=\s*false|"
+                         r"useLegacyPackaging", ln):
+                add_f(CAT_BUILD, WARN, "关闭混淆/收缩", f"`{ln.strip()[:100]}` —— 常用于方便逆向")
+            if re.search(r"buildConfigField|resValue|packaging\s*\{|jniLibs|sourceSets\s*\{|assets", ln):
+                add_f(CAT_BUILD, WARN, "改动打包内容/源集", f"`{ln.strip()[:100]}`")
+            if re.search(r"abortOnError\s*=\s*false", ln):
+                add_f(CAT_BUILD, WARN, "放宽 lint", f"`{ln.strip()[:100]}`")
+            if re.search(r"systemProperty|environment\s*\(|jvmArgs|org\.gradle\.jvmargs", ln):
+                add_f(CAT_BUILD, WARN, "改动构建 JVM 环境", f"`{ln.strip()[:100]}`")
+
+            if re.search(r"(files|fileTree)\s*\(", ln) and re.search(
+                    r"(implementation|api|runtimeOnly|compileOnly|debugImplementation)", ln):
+                add_f(CAT_BUILD, BLOCK, "非注册源依赖", f"`{ln.strip()[:100]}` —— 本地 jar 无法审计来源")
+
+            dep = re.match(r"^\s*(implementation|api|debugImplementation|releaseImplementation|"
+                           r"runtimeOnly|compileOnly|ksp|kapt|annotationProcessor|testImplementation)"
+                           r"\s*\(?\s*[\"']([^\"']+)[\"']", ln)
+            if dep:
+                coord = dep.group(2)
+                m = re.match(r"^([A-Za-z0-9_.\-]+:[A-Za-z0-9_.\-]+)", coord)
+                name = m.group(1) if m else coord
+                if re.search(r"^(https?://|git\+|s3://|file:)|files\(|fileTree\(", coord):
+                    add_f(CAT_BUILD, BLOCK, "非注册源依赖", f"`{coord}` —— URL/本地文件依赖无法审计来源")
+                elif name not in allow:
+                    near = [c for c in allow if edit_distance(name, c) <= 2 and name != c]
+                    if near:
+                        add_f(CAT_BUILD, BLOCK, "疑似仿冒依赖", f"`{name}` 近似 `{near[0]}`（拼写/大小写差异）")
+                    else:
+                        add_f(CAT_BUILD, BLOCK, "新增依赖", f"`{name}` 不在白名单里")
+        for ln in drop:
+            if re.search(r"mavenCentral|google\(\)|verification-metadata|dependency-verification", ln):
+                add_f(CAT_BUILD, BLOCK, "移除安全配置", f"`{ln.strip()[:100]}`（{path}）")
+
+    # 6) 代码能力 / 密钥 / 不可见字符
+    if ext in CODE_EXTS or ext == "":
+        for ln in add:
+            hits = []
+            for cat, sev, pat, label in CODE_RULES:
+                flags = re.IGNORECASE if cat == CAT_TELEM else 0
+                if re.search(pat, ln, flags):
+                    hits.append((cat, sev, label))
+            seen = set()
+            for cat, sev, label in hits:
+                if (cat, sev, label) in seen:
+                    continue
+                seen.add((cat, sev, label))
+                add_f(cat, sev, label, f"`{path}` → `{ln.strip()[:120]}`")
+
+            if any(ch in ln for ch in BIDI_CHARS):
+                add_f(CAT_OBF, BLOCK, "双向控制字符（Trojan Source）",
+                      f"`{path}` —— 行内有 bidi 控制符，显示顺序与编译顺序不一致")
+            if sum(ln.count(ch) for ch in INVISIBLE) >= 2:
+                add_f(CAT_OBF, BLOCK, "零宽/不可见字符", f"`{path}` → `{ln.strip()[:80]}`")
+            if CYRILLIC_GREEK.search(ln) and not CJK.search(ln):
+                add_f(CAT_OBF, BLOCK, "同形字符混排",
+                      f"`{path}` → `{ln.strip()[:80]}` —— 西里尔/希腊字母冒充拉丁字母")
+            if ln.count("\\u") >= 6:
+                add_f(CAT_OBF, WARN, "大量 Unicode 转义", f"`{path}` → `{ln.strip()[:80]}`")
+            if len(ln) > 3000:
+                add_f(CAT_OBF, WARN, "超长单行", f"`{path}` → {len(ln)} 字符")
+
+    # 6.5) 密钥：所有非二进制文件都查，文档里贴 token 同样要拦
+    if ext not in BIN_EXTS:
+        for ln in add:
+            if re.search(SECRET_PAT, ln):
+                add_f(CAT_SECRET, BLOCK, "疑似密钥/凭据", f"`{path}` -> `{ln.strip()[:120]}`")
+
+    # 7) proguard
+    if low.endswith("proguard-rules.pro"):
+        for ln in add:
+            if re.search(r"-dontobfuscate|-dontshrink|-dontoptimize", ln):
+                add_f(CAT_BUILD, WARN, "削弱混淆", f"`{ln.strip()[:100]}`")
+        for ln in drop:
+            if re.match(r"^-keep", ln.strip()):
+                add_f(CAT_BUILD, WARN, "删除 keep 规则", f"`{ln.strip()[:100]}`")
+
+    # 8) 未知类型 / 截断
+    if ext not in BIN_EXTS and ext not in CODE_EXTS and ext not in (".md", ".txt") and ext != "":
+        if status == "added":
+            add_f(CAT_BIN, WARN, "新增未知类型文件", f"`{path}` —— 确认它不是可执行/资源载荷")
+    if not patch and status in ("added", "modified") and ext not in BIN_EXTS:
+        add_f(CAT_BIN, WARN, "diff 被 GitHub 截断", f"`{path}` —— 文件过大，需本地看全文")
+
+
+def audit(meta, files, commit_entries=None):
+    allow = coords_allowlist()
+    findings = []
+    for entry in files:
+        audit_file(entry, allow, findings)
+
+    total_add = sum(int(f.get("additions") or 0) for f in files)
+    if len(files) > 50:
+        findings.append(Finding(CAT_META, WARN, "改动文件偏多", f"{len(files)} 个文件"))
+    if total_add > 1500:
+        findings.append(Finding(CAT_META, WARN, "改动量偏大", f"新增 {total_add} 行 —— 大改更容易夹带东西"))
+
+    user = meta.get("user") if isinstance(meta.get("user"), dict) else None
+    login = (user or {}).get("login")
+    age = meta.get("author_age_days")
+    if login and isinstance(age, int) and age < 90:
+        findings.append(Finding(CAT_META, WARN, "新账号提交", f"@{login} 账号仅 {age} 天"))
+    assoc = meta.get("author_association")
+    if assoc and assoc not in ("OWNER", "MEMBER", "COLLABORATOR"):
+        findings.append(Finding(CAT_META, WARN, "外部贡献者", f"author_association={assoc}"))
+    commits = meta.get("commits")
+    if isinstance(commits, int) and commits > 5:
+        findings.append(Finding(CAT_META, WARN, "提交数偏多",
+                                f"{commits} 个提交 —— 注意「先加后撤」，净 diff 干净不代表过程干净"))
+
+    if commit_entries:
+        for sha, short, entries in commit_entries:
+            local = []
+            for e in entries:
+                audit_file(e, allow, local)
+            for f in local:
+                if f.sev == BLOCK:
+                    findings.append(Finding(CAT_GRAPH, BLOCK, "单个提交内含阻断项",
+                                            f"{short} · {f.title}：{f.detail}"))
+
+    uniq, seen = [], set()
+    for f in findings:
+        if f.key() not in seen:
+            seen.add(f.key())
+            uniq.append(f)
+    return uniq
+
+
+def render(meta, files, findings):
+    blocks = [f for f in findings if f.sev == BLOCK]
+    warns = [f for f in findings if f.sev == WARN]
+    num = meta.get("number")
+    title = meta.get("title") or ""
+    head = f"PR #{num} {title}".strip() if num else title
+    out = [f"# PR 审计：{head}", ""]
+    if blocks:
+        out.append(f"**结论：不要合并** —— {len(blocks)} 项阻断，{len(warns)} 项待确认。")
+    elif warns:
+        out.append(f"**结论：没有阻断项，{len(warns)} 处需要人工看。**")
+    else:
+        out.append("**结论：通过。**")
+    out.append("")
+    out.append(f"共 {len(files)} 个文件改动；只读 diff 文本，不执行 PR 里的代码。")
+    out.append("")
+
+    def dump(group, marker):
+        for cat in CATEGORIES:
+            items = [f for f in group if f.cat == cat]
+            if not items:
+                continue
+            out.append(f"### {cat}")
+            for f in items:
+                out.append(f"{marker}**{f.title}**：{f.detail}" if marker == "- " else f"- **{f.title}**：{f.detail}")
+        out.append("")
+
+    if blocks:
+        out.append("## 阻断项")
+        dump(blocks, "- ")
+    if warns:
+        out.append("## 待确认")
+        dump(warns, "- ")
+
+    out.append("## 覆盖面")
+    out.append("")
+    out.append("| 分类 | 查什么 |")
+    out.append("| --- | --- |")
+    out.append("| " + CAT_REPO + " | workflow / CODEOWNERS / wrapper / gradlew / 签名材料 / 校验清单 / submodule / buildSrc / devcontainer / 审计脚本自身 / 其他生态 |")
+    out.append("| " + CAT_PATH + " | 路径穿越、文件名命令注入、不可见字符、同形字符 |")
+    out.append("| " + CAT_BIN + " | jar/aar/apk/dex/so/exe/zip 等二进制、资源目录新增、二进制伪装成文本、超长 diff |")
+    out.append("| " + CAT_MANIFEST + " | 新增权限、组件导出、debuggable、明文流量、sharedUserId、清单节点替换、高权限服务、开机自启 |")
+    out.append("| " + CAT_BUILD + " | 仓库源、buildscript、插件、依赖解析劫持、构建期 exec、签名/applicationId、本地 jar、白名单与仿冒依赖 |")
+    out.append("| " + CAT_NET + " | 网络 API、HTTP 客户端库、WebView |")
+    out.append("| " + CAT_TELEM + " | 统计/崩溃上报 SDK、广告标识、埋点 |")
+    out.append("| " + CAT_EXEC + " | dex 动态加载、提权命令、子进程、native 加载、反射 |")
+    out.append("| " + CAT_DATA + " | 通讯录/短信、定位/相机/剪贴板/账号、无障碍/设备管理等系统服务 |")
+    out.append("| " + CAT_PERSIST + " | 闹钟/Job/WorkManager、独立进程、开机自启 |")
+    out.append("| " + CAT_OBF + " | Base64/十六进制大块、bidi 控制符、零宽字符、同形字符、Unicode 转义、超长行 |")
+    out.append("| " + CAT_SECRET + " | AWS/gh/GitHub token/私钥/Google API key 等凭据形态 |")
+    out.append("| " + CAT_META + " | 作者账号年龄、贡献者身份、提交数、改动量 |")
+    out.append("| " + CAT_GRAPH + " | 逐提交复查（抓先加后撤） |")
+    return "\n".join(out)
 
 
 def token():
@@ -98,12 +477,30 @@ def api(url, tok):
         "User-Agent": "loglens-pr-audit",
         **({"Authorization": "Bearer " + tok} if tok else {}),
     })
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=40) as r:
         return json.load(r)
+
+
+def account_age_days(login, tok):
+    try:
+        u = api(f"https://api.github.com/users/{login}", tok)
+        created = u.get("created_at")
+        if not created:
+            return None
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt).days
+    except Exception:
+        return None
 
 
 def files_from_github(repo, pr, tok):
     meta = api(f"https://api.github.com/repos/{repo}/pulls/{pr}", tok)
+    user = meta.get("user") if isinstance(meta.get("user"), dict) else None
+    if user and user.get("login"):
+        age = account_age_days(user["login"], tok)
+        if age is not None:
+            meta["author_age_days"] = age
     files, page = [], 1
     while True:
         chunk = api(f"https://api.github.com/repos/{repo}/pulls/{pr}/files?per_page=100&page={page}", tok)
@@ -116,10 +513,29 @@ def files_from_github(repo, pr, tok):
     return meta, files
 
 
+def commits_from_github(repo, pr, tok):
+    out = []
+    try:
+        commits = api(f"https://api.github.com/repos/{repo}/pulls/{pr}/commits?per_page=50", tok)[:20]
+    except Exception:
+        return out
+    for c in commits:
+        sha = c["sha"]
+        try:
+            detail = api(f"https://api.github.com/repos/{repo}/commits/{sha}", tok)
+            entries = detail.get("files") or []
+            if entries:
+                out.append((sha, sha[:8], entries))
+        except Exception:
+            continue
+    return out
+
+
 def files_from_git(rng):
     parts = rng.split("..")
     if len(parts) != 2:
-        die("--range 要写成 BASE..HEAD，例如 origin/main..HEAD")
+        print("--range 要写成 BASE..HEAD，例如 origin/main..HEAD", file=sys.stderr)
+        sys.exit(2)
     base, head = parts
     names = subprocess.run(["git", "diff", "--name-status", "-M", base, head],
                            capture_output=True, text=True, check=True).stdout.splitlines()
@@ -131,198 +547,20 @@ def files_from_git(rng):
         cols = line.split("\t")
         st = status_map.get(cols[0][0], "modified")
         path = cols[-1]
-        body = extract_patch(patch, path) if st != "removed" else ""
-        files.append({"filename": path, "status": st, "patch": body})
-    meta = {"title": f"本地范围 {rng}", "number": None}
-    return meta, files
+        files.append({"filename": path, "status": st,
+                      "patch": extract_patch(patch, path) if st != "removed" else ""})
+    return {"title": f"本地范围 {rng}", "number": None}, files
 
 
 def extract_patch(full, path):
     marker = "diff --git a/" + path
     pos = full.find(marker)
     if pos < 0:
-        # 被重命名时路径可能出现在 b/ 侧
-        marker = " b/" + path
-        pos = full.rfind(marker)
+        pos = full.rfind(" b/" + path)
         if pos < 0:
             return ""
     end = full.find("diff --git ", pos + 10)
     return full[pos:end if end > 0 else len(full)]
-
-
-def added_lines(patch):
-    out = []
-    for raw in (patch or "").splitlines():
-        if raw.startswith("+++") or raw.startswith("---"):
-            continue
-        if raw.startswith("+"):
-            out.append(raw[1:])
-    return out
-
-
-def load_allowlist(root="."):
-    path = Path(root) / "security" / "dependency-allowlist.txt"
-    if not path.exists():
-        return set()
-    lines = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        lines.append(COORD.match(line).group(1) if COORD.match(line) else line)
-    return set(lines)
-
-
-def audit(meta, files):
-    findings = []          # (sev, title, detail)
-    allow = load_allowlist()
-    touched = set()
-    total_add = 0
-
-    def add(sev, title, detail=""):
-        findings.append((sev, title, detail))
-
-    for f in files:
-        path = f.get("filename") or ""
-        status = f.get("status", "modified")
-        patch = f.get("patch") or ""
-        touched.add(path)
-        total_add += int(f.get("additions") or 0)
-        low = path.lower()
-        ext = Path(low).suffix
-        lines = added_lines(patch)
-
-        # 1. 路径与二进制
-        if low.startswith(".github/workflows/"):
-            add(SEV_BLOCK, "改动了 CI 工作流", f"`{path}` —— 工作流只在维护者手工审阅后才会被动；PR 里改它一律先停")
-        if low.startswith("gradle/wrapper/") or low.endswith("gradlew") or low.endswith("gradlew.bat"):
-            add(SEV_BLOCK, "改动了 Gradle Wrapper", f"`{path}` —— wrapper 决定构建器本身，必须由维护者独立升级")
-        if low in ("keystore.properties", "local.properties") or low.startswith("keystore/"):
-            add(SEV_BLOCK, "碰到签名材料或本机配置", f"`{path}`")
-        if low.endswith(".gradle/verification-metadata.xml") or low.endswith("verification-metadata.xml"):
-            add(SEV_BLOCK, "改动了依赖校验清单", f"`{path}` —— 新增依赖必须由维护者本地重新生成并核对，不能在 PR 里顺手改")
-        if ext in BIN_EXTS:
-            add(SEV_BLOCK, "提交了二进制/压缩包", f"`{path}` —— 这类文件无法在 diff 里审查")
-
-        # 2. 权限
-        if low.endswith("androidmanifest.xml"):
-            for ln in lines:
-                for perm in re.findall(r"android\.permission\.([A-Z_0-9]+)", ln):
-                    full_perm = "android.permission." + perm
-                    if full_perm not in ALLOWED_PERMISSIONS:
-                        add(SEV_BLOCK, "新增敏感权限", f"`{path}` 新增 `{full_perm}`")
-
-        # 3. 依赖与仓库
-        if low.endswith((".gradle", ".gradle.kts", "libs.versions.toml")):
-            for ln in lines:
-                dep = DEP_LINE.match(ln)
-                if dep:
-                    coords = COORD.match(dep.group(2))
-                    coord = coords.group(1) if coords else dep.group(2)
-                    if coord not in allow:
-                        add(SEV_BLOCK, "新增依赖", f"`{coord}`（{path}）—— 不在 security/dependency-allowlist.txt 里")
-                if re.search(r"^\s*(classpath|id)\s*[(\"]", ln) or "version \"" in ln:
-                    add(SEV_BLOCK, "新增构建插件", f"`{ln.strip()[:90]}`")
-                if re.search(r"maven\s*\(\s*[\"']|mavenCentral\(\)|google\(\)|jitpack", ln):
-                    add(SEV_BLOCK, "改动仓库源", f"`{ln.strip()[:90]}`（{path}）")
-                if "repositoriesMode" in ln:
-                    add(SEV_BLOCK, "改动仓库策略", f"`{ln.strip()[:90]}`")
-
-        # 4. 签名与应用标识
-        if low.endswith("build.gradle.kts") and low.startswith("app/"):
-            for ln in lines:
-                if re.search(r"applicationId|namespace|signingConfig|storeFile|storePassword|keyAlias|keyPassword|versionCode|versionName", ln):
-                    add(SEV_WARN, "改动应用标识/签名/版本字段", f"`{ln.strip()[:100]}`")
-
-        # 5. 代码能力
-        if low.endswith((".kt", ".java", ".kts", ".xml")) or ext == "":
-            for ln in lines:
-                net_labels, tel_labels, risky_labels = [], [], []
-                for pat, label in NETWORK_PATTERNS:
-                    if re.search(pat, ln):
-                        net_labels.append(label)
-                for pat, label in TELEMETRY_PATTERNS:
-                    if re.search(pat, ln):
-                        tel_labels.append(label)
-                if net_labels:
-                    add(SEV_BLOCK, "引入网络能力", f"{' / '.join(sorted(set(net_labels)))}：`{path}` → `{ln.strip()[:110]}`")
-                if tel_labels:
-                    add(SEV_BLOCK, "引入上报/统计", f"{' / '.join(sorted(set(tel_labels)))}：`{path}` → `{ln.strip()[:110]}`")
-                if low.endswith((".kt", ".java")):
-                    for pat, label in RISKY_PATTERNS:
-                        if re.search(pat, ln):
-                            risky_labels.append(label)
-                    if risky_labels:
-                        add(SEV_WARN, "需要看一眼的能力", f"{' / '.join(sorted(set(risky_labels)))}：`{path}` → `{ln.strip()[:110]}`")
-                if re.search(r"[A-Za-z0-9+/]{200,}={0,2}", ln):
-                    add(SEV_BLOCK, "超长 Base64 块", f"`{path}` —— 疑似塞了编码过的载荷")
-                if ln.count("\\u") >= 8:
-                    add(SEV_WARN, "大量 Unicode 转义", f"`{path}` —— 常见于隐藏字符串")
-
-        # 6. 规则与忽略项
-        if low in (".gitignore", ".gitattributes", ".gitmodules"):
-            add(SEV_WARN, "改动仓库忽略/属性配置", f"`{path}`")
-        if low.endswith("proguard-rules.pro"):
-            for ln in lines:
-                if ln.strip().startswith("-keep") or ln.strip().startswith("-dontwarn"):
-                    add(SEV_WARN, "改动混淆规则", f"`{ln.strip()[:100]}`")
-
-        if not patch and status == "modified" and ext not in BIN_EXTS:
-            add(SEV_WARN, "diff 被 GitHub 截断", f"`{path}` —— 文件太大，审计看不到全文，需本地看")
-
-    if total_add > 1200:
-        add(SEV_WARN, "改动量偏大", f"新增 {total_add} 行 —— 大改更容易夹带东西，建议要求拆小")
-    if len(files) > 40:
-        add(SEV_WARN, "改动文件偏多", f"{len(files)} 个文件")
-
-    # 去重
-    uniq = []
-    for item in findings:
-        if item not in uniq:
-            uniq.append(item)
-    return uniq, touched
-
-
-def render(meta, files, findings):
-    blocks = [f for f in findings if f[0] == SEV_BLOCK]
-    warns = [f for f in findings if f[0] == SEV_WARN]
-    title = meta.get("title") or ""
-    num = meta.get("number")
-    head = f"PR #{num} {title}".strip() if num else title
-
-    out = []
-    out.append(f"# PR 审计：{head}")
-    out.append("")
-    if blocks:
-        out.append(f"**结论：不要合并** —— {len(blocks)} 项阻断，{len(warns)} 项待确认。")
-    elif warns:
-        out.append(f"**结论：没有阻断项，但有 {len(warns)} 处要人工看。**")
-    else:
-        out.append("**结论：通过。** 没有联网、新权限、新依赖、二进制或构建脚本改动。")
-    out.append("")
-    out.append(f"共 {len(files)} 个文件改动。审计只读 diff 文本，不执行 PR 里的代码。")
-    out.append("")
-
-    if blocks:
-        out.append("## 阻断项")
-        for sev, t, d in blocks:
-            out.append(f"- **{t}**：{d}")
-        out.append("")
-    if warns:
-        out.append("## 待确认")
-        for sev, t, d in warns:
-            out.append(f"- {t}：{d}")
-        out.append("")
-    out.append("## 查过的项目")
-    out.append("")
-    out.append("- 路径白名单：工作流 / wrapper / 签名材料 / 校验清单")
-    out.append("- 二进制与压缩包扩展名")
-    out.append("- `AndroidManifest.xml` 新增权限")
-    out.append("- 依赖坐标、构建插件、仓库源")
-    out.append("- 网络能力与第三方上报 SDK")
-    out.append("- Base64 大块与 Unicode 转义")
-    out.append("- 混淆规则与忽略配置")
-    return "\n".join(out)
 
 
 def main():
@@ -331,25 +569,32 @@ def main():
     ap.add_argument("--range", help="本地范围，例如 origin/main..HEAD")
     ap.add_argument("--repo", default="1764364648/loglens")
     ap.add_argument("--summary-file", help="把 Markdown 报告写到这里")
+    ap.add_argument("--commits", action="store_true", help="本地范围时忽略")
+    ap.add_argument("--no-commits", action="store_true", help="跳过逐提交复查")
     args = ap.parse_args()
 
     if not args.pr and not args.range:
-        die("要么 --pr，要么 --range")
+        print("要么 --pr，要么 --range", file=sys.stderr)
+        return 2
 
+    commit_entries = None
     if args.pr:
         tok = token()
         if not tok:
-            die("没有 token：先 gh auth login，或设置 GITHUB_TOKEN")
+            print("没有 token：先 gh auth login，或设置 GITHUB_TOKEN", file=sys.stderr)
+            return 2
         meta, files = files_from_github(args.repo, args.pr, tok)
+        if not args.no_commits:
+            commit_entries = commits_from_github(args.repo, args.pr, tok)
     else:
         meta, files = files_from_git(args.range)
 
-    findings, _ = audit(meta, files)
+    findings = audit(meta, files, commit_entries)
     report = render(meta, files, findings)
     print(report)
     if args.summary_file:
         Path(args.summary_file).write_text(report + "\n", encoding="utf-8")
-    return 1 if any(f[0] == SEV_BLOCK for f in findings) else 0
+    return 1 if any(f.sev == BLOCK for f in findings) else 0
 
 
 if __name__ == "__main__":
