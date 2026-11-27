@@ -133,7 +133,7 @@ keyPassword=******
 - 必须有 Shizuku 在跑；Shizuku 被系统杀掉、**或手机重启之后**，采集会断流，要重新激活一次：Android 11+ 走无线调试，Android 8–10 重新连电脑走 USB ADB（root 或常驻 adb 环境除外）。这是 Shizuku 非 root 模式的固有前提，不是本工具的门槛
 - 部分 ROM（荣耀 / 华为）默认关掉 AP 日志，需要拨号盘工程码打开，App 内会给出引导
 - 深度诊断里「应用私有目录」的内部 `files/`、`cache/` 要靠 `run-as` 读，目标 App 不是 debuggable 时只能看到 `/sdcard/Android/data/<pkg>` 那一层
-- 崩溃存档读的是系统 dropbox（`dumpsys dropbox --print`），能拿到 Java 崩溃、native 崩溃、ANR 的文本存档，**不需要 root**，logcat 滚掉之后仍然在；但 `/data/tombstones` 里的原始 tombstone 文件与 `/data/anr` 原文，shell 身份读不到，只能看到 dropbox 里抄的那份
+- 崩溃存档读的是系统 dropbox（`dumpsys dropbox --print`），能拿到 Java 崩溃、native 崩溃、ANR 的文本存档，**不需要 root**，logcat 滚掉之后仍然在。但原文不在这一层：`/data/anr`、`/data/tombstones`、`/data/system/procexitstore/*.gz` 这三处 shell 直接读都被拒（实测 Permission denied，走 `ApplicationExitInfo.getTraceInputStream()` 也只对进程自己的 uid 放行，shell 拿到的是 null）。要原文只有两条路：`bugreport`——dumpstate 以 root 身份收集，zip 里直接带 `FS/data/anr/*` 与 `FS/data/tombstones/*`；或者 root。
 - 不做完整抓包：VpnService + 自签 CA 必然撞 pinning，所以网络页只做连接快照
 - 暂停期间不抓日志，这段不会补回来——暂停就是"先不看了"；页面上的"暂停跟随"是另一件事，只控制列表滚不滚
 
