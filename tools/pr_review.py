@@ -251,7 +251,14 @@ def call_model(base, key, model, messages, timeout=150, max_tokens=2400):
         })
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                body = json.loads(r.read())
+                raw = r.read()
+                ctype = r.headers.get("Content-Type", "")
+            try:
+                body = json.loads(raw)
+            except Exception:
+                raise RuntimeError(f"HTTP {r.status} 非 JSON 响应（{ctype}）：{raw[:180]!r}")
+            if "choices" not in body:
+                raise RuntimeError(f"响应里没有 choices：{str(body)[:180]}")
             return body["choices"][0]["message"]["content"]
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300]
@@ -613,6 +620,7 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
 
 
