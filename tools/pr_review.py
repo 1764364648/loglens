@@ -49,8 +49,10 @@ DASHSCOPE_CHAIN = (
 # 额度耗尽 / 限流 的特征词：命中就换下一个模型，而不是傻等重试
 QUOTA_HINTS = (
     "quota", "insufficient", "exhaust", "arrear", "balance", "free tier",
-    "rate limit", "too many requests", "额度", "余额", "限流", "欠费", "超过",
+    "额度", "余额", "欠费", "超过配额", "用完",
 )
+# 只是“这一刻太挤”的特征词：先原模型等一轮再试，别急着换人（换了也没残稿，但结论会换人判）
+RATE_HINTS = ("429", "rate limit", "too many requests", "限流", "并发", "throttl")
 SKIP_EXT = {
     ".jar", ".aar", ".apk", ".aab", ".dex", ".so", ".dll", ".exe", ".bin",
     ".class", ".jks", ".keystore", ".p12", ".pfx", ".zip", ".7z", ".rar",
@@ -301,6 +303,11 @@ def is_quota_error(text):
     return any(h in low for h in QUOTA_HINTS)
 
 
+def is_rate_limit(text):
+    low = str(text).lower()
+    return any(h in low for h in RATE_HINTS)
+
+
 def provider_chain(base, model, env_models=""):
     """排队要试哪些模型：显式 LLM_MODELS 优先；百炼在默认队列前面插上配置的模型。"""
     explicit = parse_models(env_models)
@@ -312,18 +319,33 @@ def provider_chain(base, model, env_models=""):
     return single or [DEFAULT_MODEL]
 
 
-def call_chain(base, key, models, messages, max_tokens=2400, timeout=150):
-    """按队列依次调用：额度用完/限流就换下一个，返回 (内容, 命中的模型, 试过的模型)。"""
-    tried = []
+def call_chain(base, key, models, messages, max_tokens=2400, timeout=150, pause=20):
+    """按队列整包重发：瞬时限流先原模型等一轮，额度真用完才换下一个。
+
+    换模型时上一次请求是被拒绝的，没有任何残稿；新模型拿到的是同一份完整 prompt，
+    从头重判，不存在“续写半截”的问题。
+    返回 (内容, 命中的模型, 已弃用的模型, 是否等过限流)。
+    """
+    tried, waited = [], False
     for m in models:
-        try:
-            content = call_model(base, key, m, messages, timeout=timeout,
-                                 max_tokens=max_tokens, retries=0)
-            return content, m, tried
-        except Exception as e:
-            kind = "额度/限流" if is_quota_error(e) else "调用失败"
-            tried.append(m)
-            print(f"模型 {m} {kind}：{clean(e, 160)}", file=sys.stderr)
+        for attempt in (0, 1):
+            try:
+                content = call_model(base, key, m, messages, timeout=timeout,
+                                     max_tokens=max_tokens, retries=0)
+                return content, m, tried, waited
+            except Exception as e:
+                quota = is_quota_error(e)
+                rate = is_rate_limit(e) and not quota
+                if rate and attempt == 0:
+                    # 只是这一秒太挤，不是额度没了：原地等一轮再试，保持同一模型的一致性
+                    print(f"模型 {m} 瞬时限流，{pause}s 后原模型再试：{clean(e, 120)}", file=sys.stderr)
+                    waited = True
+                    time.sleep(pause)
+                    continue
+                kind = "额度耗尽" if quota else ("限流未恢复" if rate else "调用失败")
+                tried.append(m)
+                print(f"模型 {m} {kind}，换下一个：{clean(e, 140)}", file=sys.stderr)
+                break
     raise RuntimeError(f"候选模型全失败：{'、'.join(tried) or '无'}")
 
 
@@ -537,9 +559,10 @@ def run(args):
     user, kept, skipped = build_user_prompt(meta, files, commits, note, eco=eco)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
     raw, used, tried = None, model, []
+    waited = False
     try:
-        raw, used, tried = call_chain(base, key, chain, messages,
-                                      max_tokens=900 if eco else 2400)
+        raw, used, tried, waited = call_chain(base, key, chain, messages,
+                                              max_tokens=900 if eco else 2400)
     except Exception as e:
         msg = f"AI 评审这次没跑成：{clean(e, 220)}。结论以规则闸门和人工 review 为准。"
         print(msg, file=sys.stderr)
@@ -559,7 +582,12 @@ def run(args):
 
     label = used + ("（零密钥免费网关，质量一般，建议配免费 key）" if mode == "free" else "")
     if len(chain) > 1:
-        label += f"（模型队列第 {len(tried) + 1}/{len(chain)} 个）"
+        note = f"（模型队列第 {len(tried) + 1}/{len(chain)} 个"
+        if tried:
+            note += "，前序候选额度耗尽后整包重判"
+        if waited:
+            note += "，等过一次瞬时限流"
+        label += note + "）"
     body = render(meta, rev, kept, skipped, label)
     print(body)
     if args.summary_file:
@@ -648,8 +676,24 @@ def selftest():
     real = globals()["call_model"]
     globals()["call_model"] = _fake_call
     try:
-        content, used, tried = call_chain("b", "k", ["m1", "m2"], [])
+        content, used, tried, waited = call_chain("b", "k", ["m1", "m2"], [])
         check("额度用完换下一个", content == "ok" and used == "m2" and tried == ["m1"])
+    finally:
+        globals()["call_model"] = real
+
+    calls = []
+
+    def _rate_then_ok(base, key, model, messages, **kw):
+        calls.append(model)
+        if len(calls) == 1:
+            raise RuntimeError("HTTP 429: Too Many Requests")
+        return "ok"
+
+    globals()["call_model"] = _rate_then_ok
+    try:
+        content, used, tried, waited = call_chain("b", "k", ["m1", "m2"], [], pause=0)
+        check("瞬时限流不换模型", content == "ok" and used == "m1" and calls == ["m1", "m1"])
+        check("等过限流有标记", waited is True and tried == [])
     finally:
         globals()["call_model"] = real
 
