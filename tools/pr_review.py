@@ -475,7 +475,9 @@ def run(args):
     if not key and ali_key:
         key, base = ali_key, (base or DASHSCOPE_BASE)
     key, base, model, mode = resolve_provider(key, base, os.environ.get("LLM_MODEL") or "")
-    chain = provider_chain(base, model, os.environ.get("LLM_MODELS") or "") if key else [model]
+    # 队列用「原始」的 LLM_MODEL：百炼没指定模型时不该把智谱默认名塞进队列（会白撞一次 404）
+    chain = provider_chain(base, os.environ.get("LLM_MODEL") or "",
+                           os.environ.get("LLM_MODELS") or "") if key else [model]
     gh = token()
 
     if args.stub:
