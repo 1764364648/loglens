@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicLong
  *    用户截图即可看到命令、进程号、退出码、stderr。
  * 6. **读取线程死掉 / 长时间无输出自动重启**，避免卡在「实时」状态假死。
  */
-class LogcatEngine(private val listener: Listener) {
+class LogcatEngine(private val listener: Listener) : LogcatSource {
 
     interface Listener {
         fun onStarted(mode: String, command: String)
@@ -129,13 +129,13 @@ class LogcatEngine(private val listener: Listener) {
 
     fun isRunning(): Boolean = running.get()
 
-    fun start(
+    override fun start(
         packageName: String,
         uid: Int?,
         pid: Int?,
         includeEvents: Boolean,
-        globalMode: Boolean = false,
-        buffers: Set<LogBuffer> = LogBuffer.DEFAULT
+        globalMode: Boolean,
+        buffers: Set<LogBuffer>
     ) {
         stop()
 
@@ -620,7 +620,7 @@ class LogcatEngine(private val listener: Listener) {
         return if (digits in 1..8) value else 0
     }
 
-    fun stop() {
+    override fun stop() {
         running.set(false)
         generation++
         // 让仍在读旧进程的线程和旧进程 exit 线程立刻失效

@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 单文件到达上限后自动轮转成 xxx.1.log / xxx.2.log …，并只保留最近几份，
  * 避免长时间开着采集把手机存储写满（原来是无上限一直追加）。
  */
-class FileLogWriter(private val context: Context) {
+class FileLogWriter(private val context: Context) : LogSink {
 
     private val queue = LinkedBlockingQueue<String>(200_000)
     private val alive = AtomicBoolean(false)
@@ -39,15 +39,16 @@ class FileLogWriter(private val context: Context) {
 
     /** 落盘彻底失败（ENOSPC / 存储被卸载）时回调一次，上层据此提示「已停止落盘」 */
     @Volatile
-    var onFatal: ((String) -> Unit)? = null
+    override var onFatal: ((String) -> Unit)? = null
 
     private fun reportFatal(msg: String) {
         runCatching { onFatal?.invoke(msg) }
     }
 
     @Volatile
-    var currentFile: File? = null
-        private set
+    private var curFile: File? = null
+
+    override val currentFile: File? get() = curFile
 
     private fun limitBytes(): Long = runCatching {
         Prefs(context).logFileMaxMb.toLong() * 1024L * 1024L
@@ -57,7 +58,7 @@ class FileLogWriter(private val context: Context) {
         Prefs(context).logFileKeep
     }.getOrDefault(3).coerceIn(1, 20)
 
-    fun start(packageName: String) {
+    override fun start(packageName: String) {
         stop()
         val d = File(context.getExternalFilesDir(null), "capture").apply { mkdirs() }
         dir = d
@@ -82,7 +83,7 @@ class FileLogWriter(private val context: Context) {
     private fun openNext(): Boolean {
         val d = dir ?: return false
         val f = if (seq == 0) File(d, "$baseName.log") else File(d, "$baseName.$seq.log")
-        currentFile = f
+        curFile = f
         writer = try {
             BufferedWriter(FileWriter(f, true), 64 * 1024)
         } catch (t: Throwable) {
@@ -173,7 +174,7 @@ class FileLogWriter(private val context: Context) {
         runCatching { writer?.close() }
     }
 
-    fun enqueue(entry: LogEntry) {
+    override fun enqueue(entry: LogEntry) {
         if (!alive.get()) return
         val text = if (entry.isContinuation) {
             "    ${entry.message}"
@@ -183,7 +184,7 @@ class FileLogWriter(private val context: Context) {
         queue.offer(text)
     }
 
-    fun stop() {
+    override fun stop() {
         alive.set(false)
         runCatching { thread?.join(1_500) }
         thread = null

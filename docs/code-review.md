@@ -119,7 +119,7 @@
 
 > **2026-11-27 补齐**：本节 24 条已逐条改代码并合入 main —— 高优先级 6 条（续行随父行显示、预录改为可观察运行状态且重启后自动接回、预录走前台服务、Shizuku 未运行时的文案三态）、中优先级 9 条（历史文件 IO 移出主线程、授权监听随页面销毁注销、时间轴录制绑 RESUMED、取消异常重新抛出、预览请求加序号、`getPackageInfo`/`label`/`length` 移出组合、取证落盘失败记 NG 步骤、`FileLogWriter` 写失败上报 notice）、低优先级 9 条（崩溃跳转按截断长度比较、书签改用内容签名键、下一个命中/折叠区间/迷你图按下标换行号、高亮与崩溃归集可滚动、浮窗存活改 StateFlow、诊断页刷新按钮 busy 禁用）。下面原文保留，作为问题索引与定位参考。
 
-> 行号是 2026-11 评审当时的快照。`ui/LogScreen.kt` 在之后做过一次拆分（1086 行巨型 composable → `LogScreenUi` 状态容器 + 顶栏/底栏/筛选区/提示区/列表/弹窗六个子 composable），该文件的行号已整体位移，下面按 `LogScreen.kt:NNN` 的引用只保证文件存在且行号在范围内，定位请按同一行给出的标识符/函数名检索。其余文件未动，行号仍然准确。
+> 行号是 2026-11 评审当时的快照。`ui/LogScreen.kt` 在之后做过一次拆分（1086 行巨型 composable → `LogScreenUi` 状态容器 + 顶栏/底栏/筛选区/提示区/列表/弹窗六个子 composable），该文件在 2026-11-27 又拆了一次：2471 行拆成 `LogScreen.kt` / `LogScreenChrome.kt` / `LogScreenTools.kt` / `LogScreenPanels.kt` / `LogScreenList.kt` / `LogScreenFormat.kt` 六个文件，行号已彻底不可考，下面按 `LogScreen.kt` 的引用只保证文件存在，定位请按同一行给出的标识符/函数名检索。2026-11-27 之前其余文件未动，行号仍然准确。
 
 以下问题均能在代码中直接定位，但要么会改变用户可见的界面/交互（本工单没有 `emulator-5560`，也没有在真机上构造完整采集链路；UI 行为只验证了权限弹窗这一种状态），要么需要跨模块设计取舍，因此没有直接改代码。
 
@@ -134,8 +134,10 @@
 
 ### 中优先级（主线程 IO / 生命周期 / 资源）
 
-7. `app/src/main/java/dev/loglens/ui/LogScreen.kt:177-195`、`:860-863` — SAF 导入与历史文件回放直接用无上限 `readText()`，1–2GB 文件会 OOM；应按文件大小拒绝或改为流式解析。
-8. `app/src/main/java/dev/loglens/ui/LogScreen.kt:760-762`、`:881-885` — “历史文件”列表与删除在主线程 `listFiles/length/delete`；应移到 `Dispatchers.IO`。
+> 行号说明：以下条目是评审当时的原文记录。`LogScreen` 已在 2026-11-27 拆成 6 个文件（`LogScreen.kt` / `LogScreenChrome.kt` / `LogScreenTools.kt` / `LogScreenPanels.kt` / `LogScreenList.kt` / `LogScreenFormat.kt`），原行号不再有意义，按函数名检索即可。
+
+7. `app/src/main/java/dev/loglens/ui/LogScreen.kt` — SAF 导入与历史文件回放直接用无上限 `readText()`，1–2GB 文件会 OOM；应按文件大小拒绝或改为流式解析。
+8. `app/src/main/java/dev/loglens/ui/LogScreen.kt` — “历史文件”列表与删除在主线程 `listFiles/length/delete`；应移到 `Dispatchers.IO`。
 9. `app/src/main/java/dev/loglens/shizuku/ShizukuHelper.kt:24,84-101` — 授权结果监听器与静态 `lastResult` 在页面销毁后不注销，回调 lambda 捕获 Activity context；需要在 `HomeScreen` 加 `DisposableEffect` 调用 `releaseListener()`，并让 `releaseListener()` 同步清空 `lastResult`。
 10. `app/src/main/java/dev/loglens/ui/NetScreen.kt:216-244` — 时间轴录制协程只绑定 composition，按 Home 后仍每 1.4 秒跑 shell 采样；应改用 `repeatOnLifecycle(RESUMED)` 或页面 stop 时暂停。
 11. `app/src/main/java/dev/loglens/ui/NetScreen.kt:222-236` — 停止录制时被取消的采样仍可能把假的“读取失败”写回页面（`runCatching` 吞掉 `CancellationException`）；应重新抛出取消异常并在写状态前检查 `isActive`。
@@ -146,12 +148,12 @@
 
 ### 低优先级（状态/边界）
 
-16. `app/src/main/java/dev/loglens/data/CrashStats.kt:76`、`ui/LogScreen.kt:1215` — `sample` 截断到 600 字符，跳转却用完整 `message == sample`，超长消息永远跳不到；建议增加 entry id 或比较时同样截断。
+16. `app/src/main/java/dev/loglens/data/CrashStats.kt:76`、`ui/LogScreen.kt` — `sample` 截断到 600 字符，跳转却用完整 `message == sample`，超长消息永远跳不到；建议增加 entry id 或比较时同样截断。
 17. `app/src/main/java/dev/loglens/data/FilterPreset.kt:55,101-115` — `builtins()` 六条内置预设全仓库零调用，首次安装的预设 chip 为空；需要把内置预设拼进 `PresetStore.load` 的返回值（会改变工具条展示）。
 18. `app/src/main/java/dev/loglens/ui/LogScreen.kt:134-158,390-392` — 书签只用裸 `id` 做键，离线导入 id 与实时 id 都从 1 开始，会串收藏；需要带来源的复合键。
-19. `app/src/main/java/dev/loglens/ui/LogScreen.kt:721-726` — “下一个命中”把命中序号直接当 `LazyColumn` 行号（且折叠后 `visible` 与 `displayRows` 行数不同），单条命中时会滚到列表另一头。
-20. `app/src/main/java/dev/loglens/ui/LogScreen.kt:420-434` — 跳转到被折叠区间的非头行时只检查 `Fold.head.id`，必然提示“该条不在当前视图内”；需要保存折叠区间并在展开后定位。
-21. `app/src/main/java/dev/loglens/ui/LogScreen.kt:1117-1127`（`ui/LogExtras.kt:120-129`）— 迷你图用 `visible` 着色、却按 `displayRows.size` 求跳转下标，折叠时坐标错位；`pointerInput` key 也没有包含折叠后的行数。
+19. `app/src/main/java/dev/loglens/ui/LogScreen.kt` — “下一个命中”把命中序号直接当 `LazyColumn` 行号（且折叠后 `visible` 与 `displayRows` 行数不同），单条命中时会滚到列表另一头。
+20. `app/src/main/java/dev/loglens/ui/LogScreen.kt` — 跳转到被折叠区间的非头行时只检查 `Fold.head.id`，必然提示“该条不在当前视图内”；需要保存折叠区间并在展开后定位。
+21. `app/src/main/java/dev/loglens/ui/LogScreen.kt`（`ui/LogExtras.kt:120-129`）— 迷你图用 `visible` 着色、却按 `displayRows.size` 求跳转下标，折叠时坐标错位；`pointerInput` key 也没有包含折叠后的行数。
 22. `app/src/main/java/dev/loglens/ui/LogExtras.kt:459-520,678-733` — 高亮规则/崩溃归集放在定高 `Column` 且没有滚动，超过约 6/7 条后的记录不可达；建议改为定高 `LazyColumn` 或加 `verticalScroll`。
 23. `app/src/main/java/dev/loglens/ui/LogScreen.kt:255,730-751`（`service/OverlayLogService.kt:130-136,217-224`）— `overlayAlive` 只是进入页面时的本地快照；从浮窗自身关闭后日志页仍显示“浮窗已开”，需要把 `alive` 改成 `StateFlow` 或回调同步。
 24. `app/src/main/java/dev/loglens/ui/DiagScreen.kt:313`（刷新按钮）— 刷新/重采集按钮在 `busy` 时未禁用，连续点击会并发跑多份阻塞型 `dumpsys/logcat`，造成资源浪费。
@@ -218,9 +220,16 @@
 7. **结论模型漂移不披露**（`tools/pr_review.py` / `security/ai-review.md`）：模型队列换人等于换能力档位，同一份 diff 可能从「合理」变成「存疑」；标签一旦由「当时轮到谁」决定就成了噪音。现在结论仍由首选模型给出，一旦降级到队列后面，评论脚注显式标「⚠ 判据与上几轮不可比」。
 8. **信任模型与放行边界写进规则**（`SECURITY.md` / `security/ai-review.md`）：明确「默认免费网关会收到 PR 标题、描述、提交信息与 diff 全文，这和 App 里『日志不出本机』是两套信任模型」；并把「AI 评审不构成 approve，合并前必须 CI 全绿 + 真机冒烟」从默契变成仓库规则。
 
-### 没做，原因
+### 9. `CaptureController` 状态机测试（假引擎注入）—— 原来推掉，本轮补上
 
-- **给 `CaptureController` 补状态机测试（假引擎注入）**：`CaptureController` 是 `object`，启动序列直接吃 `Context`、`ShizukuHelper`、`FileLogWriter`，纯 JVM 单测跑不起来。真要测「启动中 stop → Idle / writer 关闭 / 无二次 spawn」，得先把引擎与写入器接口化、给控制器开注入点，或者引入 Robolectric（新依赖必须过 `verification-metadata` 校验）。这是结构性改动，不是补两条断言，单独立项。
-- **拆 `LogScreen.kt` 文件**：composable 已经拆成容器 + 六个区域，文件仍约 2400 行。维护者明确不拆——拆文件会产生大量纯移动 diff，收益只是让下一个人少读上下文。不再重复提。
+先抽端口再注入，不改生产行为：
 
-> 本轮守门结果：`assembleDebug` + `testDebugUnitTest` + `lintDebug` 全绿（0 error / 88 warning / 12 hint），单测 76 条，`python tools/check_docs.py` = 89 处引用 + 2 处计数全部有效，`python tools/pr_review.py --selftest` = 52 条全过。
+- `logcat/CapturePorts.kt`：新增 `LogcatSource`（start/stop）与 `LogSink`（onFatal/currentFile/start/enqueue/stop）两个接口，`LogcatEngine` 与 `FileLogWriter` 原样实现它们（后者的 `currentFile` 由私有 `curFile` 只读暴露）。
+- `capture/CaptureHooks.kt`：单测注入点（`allowWithoutContext` / `skipShizukuChecks` / `skipProcRefresh` / `sourceFactory` / `sinkFactory`），默认全空/全 false 时走真实实现，`CaptureController` 里只有读取、没有写入。
+- `CaptureControllerTest` 4 条：①启动中途 `stop()` 必须回 `Idle`、写入器只关一次、不得拉起引擎；②正常启动后 `stop()` 引擎只 stop 一次；③`stop()` 之后旧引擎才回调 `onStarted` 不得把采集复活；④上一个引擎晚到的 `onExit` 不得把新会话清成 `Idle`。fixture 里显式 `AppGraph.install()`，没有引入 Robolectric。
+
+### 10. 拆 `LogScreen.kt` —— 原来推掉，本轮补上
+
+2471 行拆成 6 个文件：`LogScreen.kt` 672（状态容器 + 书签 + 主屏）、`LogScreenChrome.kt` 393（顶栏/底栏/提示条）、`LogScreenTools.kt` 333（工具条 + 导出弹窗）、`LogScreenPanels.kt` 503（五个弹窗 + 筛选面板）、`LogScreenList.kt` 622（列表区/空态/行/操作栏）、`LogScreenFormat.kt` 344（纯函数：着色/格式化/折叠）。纯搬移不改逻辑，顶层 `private` 统一改 `internal` 以跨文件可见，嵌套成员原样；`compileDebugKotlin` 与 `lint` 全绿，WSA 上首页/日志页/弹窗照常渲染。
+
+> 本轮守门结果：`assembleDebug` + `testDebugUnitTest` + `lintDebug` 全绿（0 error / 87 warning / 12 hint），单测 80 条（新增 `CaptureControllerTest` 4 条），`python tools/check_docs.py` = 108 处引用 + 2 处计数全部有效，`python tools/pr_review.py --selftest` = 52 条全过。

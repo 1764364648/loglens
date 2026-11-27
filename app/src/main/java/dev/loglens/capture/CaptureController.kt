@@ -10,6 +10,8 @@ import dev.loglens.diag.SelfLog
 import dev.loglens.logcat.CrashNotifier
 import dev.loglens.logcat.FileLogWriter
 import dev.loglens.logcat.LogcatEngine
+import dev.loglens.logcat.LogcatSource
+import dev.loglens.logcat.LogSink
 import dev.loglens.service.CaptureService
 import dev.loglens.shizuku.ShizukuHelper
 import kotlinx.coroutines.CoroutineScope
@@ -42,8 +44,8 @@ object CaptureController {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var engine: LogcatEngine? = null
-    private var writer: FileLogWriter? = null
+    private var engine: LogcatSource? = null
+    private var writer: LogSink? = null
     private var appContext: Context? = null
 
     /** 预录模式：在跑但没落盘，随时可以升级成正式采集 */
@@ -119,7 +121,7 @@ object CaptureController {
         globalMode: Boolean = false,
         buffers: Set<LogBuffer> = LogBuffer.DEFAULT
     ) {
-        if (appContext == null) {
+        if (appContext == null && !CaptureHooks.allowWithoutContext) {
             setPassive(false)
             return
         }
@@ -153,7 +155,7 @@ object CaptureController {
      * 用户还没决定要正式录制时，崩溃也能靠快照把「崩溃前发生了什么」留下来。
      */
     fun startPassive(app: AppRepository.AppItem) {
-        if (appContext == null) return
+        if (appContext == null && !CaptureHooks.allowWithoutContext) return
         if (_state.value is State.Capturing || _state.value is State.Preparing) return
         setPassive(true)
         start(
@@ -193,17 +195,18 @@ object CaptureController {
     fun isPaused(): Boolean = _paused.value
 
     private fun launchEngine(args: StartArgs, clearFirst: Boolean, sid: Long) {
-        val ctx = appContext ?: return
+        val ctx = appContext
+        if (ctx == null && !CaptureHooks.allowWithoutContext) return
         val app = args.app
 
-        if (!ShizukuHelper.isBinderAlive()) {
+        if (!CaptureHooks.skipShizukuChecks && !ShizukuHelper.isBinderAlive()) {
             if (session.get() != sid) return
             restarting = false
             _state.value = State.Failed("Shizuku 服务未运行。请先启动 Shizuku（无线调试方式），再回到本页重试。")
             SelfLog.w("capture", "启动中止：Shizuku binder 不可用 target=${app.packageName}")
             return
         }
-        if (!ShizukuHelper.isPermissionGranted()) {
+        if (!CaptureHooks.skipShizukuChecks && !ShizukuHelper.isPermissionGranted()) {
             if (session.get() != sid) return
             restarting = false
             _state.value = State.Failed("尚未获得 Shizuku 授权。请点击「请求授权」并在弹窗中允许。")
@@ -213,7 +216,7 @@ object CaptureController {
 
         // pid → 进程名表：`package:` / `process:` 这类查询全靠它，之前全仓没人调用 refresh，
         // 表永远是空的。会话期间每 10 秒刷一次，退出循环的唯一条件是令牌换代。
-        scope.launch {
+        if (!CaptureHooks.skipProcRefresh) scope.launch {
             var lastCount = -1
             var lastFailAt = 0L
             while (isActive && session.get() == sid) {
@@ -238,7 +241,7 @@ object CaptureController {
         }
 
         scope.launch {
-            var createdWriter: FileLogWriter? = null
+            var createdWriter: LogSink? = null
             try {
                 if (session.get() != sid) return@launch
                 if (clearFirst) {
@@ -261,7 +264,10 @@ object CaptureController {
                 if (session.get() != sid) return@launch
 
                 if (args.saveToFile && writer == null) {
-                    val w = FileLogWriter(ctx)
+                    val w = CaptureHooks.sinkFactory?.invoke() ?: run {
+                        val c = ctx ?: return@launch
+                        FileLogWriter(c)
+                    }
                     // 落盘失败（存储满 / 存储被卸载）要让人看见：之前只写 SelfLog，界面一直显示「落盘中」
                     w.onFatal = { msg ->
                         _notice.value = msg
@@ -281,8 +287,8 @@ object CaptureController {
 
                 // 旧引擎的线程可能晚于新会话才回调 onExit，用归属校验挡住，
                 // 否则它会把刚建好的 writer 一起 stop 掉（表现：采集跑一会儿就不再写文件）
-                var self: LogcatEngine? = null
-                val eng = LogcatEngine(object : LogcatEngine.Listener {
+                var self: LogcatSource? = null
+                val listener = object : LogcatEngine.Listener {
                     override fun onStarted(mode: String, command: String) {
                         if (engine !== self || session.get() != sid) return
                         restarting = false
@@ -299,14 +305,15 @@ object CaptureController {
                         if (engine !== self) return
                         AppGraph.logs.add(entry)
                         writer?.enqueue(entry)
-                        if (entry.isCrash) {
-                            runCatching { saveCrashSnapshot(ctx, entry) }
+                        val c = ctx
+                        if (entry.isCrash && c != null) {
+                            runCatching { saveCrashSnapshot(c, entry) }
                                 .onFailure { _notice.value = "崩溃快照失败：${it.message ?: it.javaClass.simpleName}" }
                             runCatching {
                                 CrashNotifier.notifyCrash(
-                                    ctx,
+                                    c,
                                     entry,
-                                    runCatching { Prefs(ctx).crashNotify }.getOrDefault(true)
+                                    runCatching { Prefs(c).crashNotify }.getOrDefault(true)
                                 )
                             }.onFailure { _notice.value = "崩溃通知失败：${it.message ?: it.javaClass.simpleName}" }
                         }
@@ -353,7 +360,8 @@ object CaptureController {
                         _notice.value = "日志通道被系统限制，点日志页上方的提示条查看解决办法"
                         SelfLog.w("capture", "日志通道被限制 hint=$hint")
                     }
-                })
+                }
+                val eng = CaptureHooks.sourceFactory?.invoke(listener) ?: LogcatEngine(listener)
                 self = eng
                 engine = eng
                 if (session.get() != sid) {
