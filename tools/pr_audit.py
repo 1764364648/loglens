@@ -473,9 +473,15 @@ def render(meta, files, findings):
 def pr_comments(pr, repo, tok):
     url = f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100"
     try:
-        return api(url, tok)
-    except Exception:
+        data = api(url, tok)
+    except Exception as e:
+        print(f"读取已有评论失败：{type(e).__name__} {e}", file=sys.stderr)
         return []
+    if isinstance(data, dict):
+        print(f"评论列表格式异常：{list(data)[:4]}", file=sys.stderr)
+        return []
+    print(f"已有评论 {len(data)} 条", file=sys.stderr)
+    return data
 
 
 def upsert_comment(pr, repo, tok, body):
@@ -663,3 +669,5 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# 缩短审计：只查明显问题
