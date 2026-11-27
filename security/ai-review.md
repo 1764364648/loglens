@@ -47,7 +47,7 @@
 
 | 有没有 `LLM_API_KEY` | 走哪 | 代价 |
 | --- | --- | --- |
-| 没配 | 零密钥的 OpenAI 兼容免费网关（`text.pollinations.ai`） | 0 元，开箱即用；质量一般、有限速；**diff 会发给这个第三方网关** |
+| 没配 | 零密钥的 OpenAI 兼容免费网关（`text.pollinations.ai`，唯一模型 `openai-fast`，别名 `openai`/`gpt-oss-20b`） | 0 元，开箱即用；实测是小模型档（自报知识截止 2024-06，响应里 model 字段 `gpt-6-luna-classic`），匿名层会间歇 402 限流；**diff 会发给这个第三方网关** |
 | 配了 | 默认智谱 `GLM-4.7-Flash`（`https://open.bigmodel.cn/api/paas/v4`） | 输入输出都免费，200K 上下文，质量明显更好；只需注册一个 key |
 
 配置方式：`Settings → Secrets and variables → Actions` 加 Secret `LLM_API_KEY`；想换别家就再加 Variables `LLM_BASE_URL`（OpenAI 兼容端点）、`LLM_MODEL`（模型名）。
@@ -72,4 +72,5 @@ python tools/pr_review.py --stub verdict.json --repo owner/name --pr 1   # 用�
 - 单次约 3 万～4 万输入 token、2 千输出 token；`audit` 没过的 PR 不跑，草稿不跑，同一 PR 新 push 会取消上一次。
 - 它是评审意见，不是放行依据：`main` 的合并仍由「`pr-audit` 必须绿 + 1 次人工批准 + CODEOWNERS」决定。
 - 信息不足时它应该回答“存疑”，而不是猜；看到“存疑”就当你自己要多看一眼。
+
 
