@@ -416,10 +416,13 @@ object CaptureController {
         setPassive(false)
         _paused.value = false
         lastArgs = null
+        // fromState 必须在改状态之前取：改完再取，日志里永远是 Idle，
+        // 「从哪个状态停的」这个排查线索就没了
+        val fromState = _state.value.javaClass.simpleName
         if (_state.value !is State.Failed) {
             _state.value = State.Idle
         }
-        SelfLog.i("capture", "停止（含收尾写盘）fromState=${_state.value.javaClass.simpleName}")
+        SelfLog.i("capture", "停止（含收尾写盘）fromState=$fromState")
         scope.launch { runCatching { toClose?.stop() } }
     }
 

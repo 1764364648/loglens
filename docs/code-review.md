@@ -191,7 +191,7 @@
 - **权限/组件安全**：`AndroidManifest.xml` 中两个 Service 均 `exported=false`；`MainActivity` 只接 MAIN/LAUNCHER；`FileProvider` `exported=false` 且 `file_paths.xml` 只覆盖 app 私有/app-specific 目录；`ShizukuProvider` 由签名级 `INTERACT_ACROSS_USERS_FULL` 保护；未发现导出的 Receiver、明文密钥/Token、日志打印敏感凭据。
 - **PendingIntent**：`CaptureService` 三个与 `CrashNotifier` 一个 PendingIntent 全部显式 `FLAG_IMMUTABLE` + `FLAG_UPDATE_CURRENT`，组件均为显式 Intent，Android 12+ 无可变性崩溃/劫持面。
 - **前台服务/通知**：`specialUse` 类型、`FOREGROUND_SERVICE_SPECIAL_USE`、`PROPERTY_SPECIAL_USE_FGS_SUBTYPE`、API 34+ 三参 `startForeground`、`POST_NOTIFICATIONS` 运行时申请都已就位；`START_STICKY` 空 intent 分支会直接收摊，不会留“等待开始”的残岛。
-- **Shizuku 通道**：`ShizukuProcess` 通过反射命中 `newProcess(String[], String[], String)`；`proguard-rules.pro` 的宽 keep 规则覆盖了该 private 方法；权限回调经 Shizuku 主线程 Handler 派发，Home 回调里写 Compose state/Toast 不存在无 Looper 崩溃；权限状态六种分支的文案与底部动作基本自洽（仅 `alive=false` 文案问题已单列）。
+- **Shizuku 通道**：`ShizukuProcess` 通过反射按「方法名 + 三个参数」命中 `newProcess(String[], String[], String)`；该方法在库里是 private，`proguard-rules.pro` 用 `*** newProcess(...)`（不带 `public`）显式保护——写成 `public static ***` 匹配不到 private，会静默失效；权限回调经 Shizuku 主线程 Handler 派发，Home 回调里写 Compose state/Toast 不存在无 Looper 崩溃；权限状态六种分支的文案与底部动作基本自洽（仅 `alive=false` 文案问题已单列）。
 - **logcat 解析/采集**：`LogcatParser` 的年份缓存有 `@Synchronized`；stdout/events 两条流并发解析不会破坏共享状态；`LogcatEngine` 的 argv 数组交给 Shizuku，不经过 shell 字符串拼接；`--uid=` 只由整数 uid 构成，不存在注入；客户端 pid 复核与服务端 `--uid` 双保险逻辑一致；`FileLogWriter` 队列有界、轮转/保留份数已实现。
 - **数据层**：`LogRepository` 的 buffer/pending/统计由同一把锁保护，`attach()` 原子清空 pending 避免 LazyColumn 重复 key；`AppRepository.loadInstalled` 在 `Dispatchers.IO`；`Prefs` 的数值项都有 `coerceIn`，无明文凭据；`IssueRules` 预筛关键词与规则表数量有 `require` 校验、正则只编译一次；`HighlightRules` 非法正则/颜色会安全跳过。
 - **导出/分享**：`ExportFormats` 的 TXT/CSV/JSON/HTML/ZIP/PDF 都有上限或异常兜底；CSV 有 BOM 与引号转义，JSON/HTML 有转义；分享统一走 FileProvider + `FLAG_GRANT_READ_URI_PERMISSION`；文件名只由包名/时间戳组成，无路径穿越。
@@ -309,5 +309,33 @@ PR #9：最近一次评审（更新于 2026-11-27T13:52:50Z）给了 3 条问题
 ```
 
 自测 63 → 70 条（新增：模块归组三种路径、跨模块提示、序号列、序号回读、反馈解析）。
+
+### 14. 第五轮外部评审：R8 是假的、年份口径、两处小事、日志里的假状态、定位表述
+
+五条逐条对照源码，代码四条全部成立，第五条是叙事问题。
+
+**B. R8 混淆名不副实。** `proguard-rules.pro` 原来第 8 行是 `-keep class dev.loglens.** { *; }`——自有类名与方法名全保留，R8 只剩「剥 `Log.v/d/i` + 删无用依赖 + 压缩资源」。而 README 却写「release 走 R8 混淆，崩溃堆栈用 `mapping.txt` 还原」，自己的类根本不会出现在 mapping 里。全仓库唯一的反射入口是 `ShizukuProcess.kt:13` 的 `Class.forName("rikka.shizuku.Shizuku")` + `declaredMethods`，`rikka.shizuku.**` 的 keep 已覆盖；依赖里没有 Room / Hilt / kotlinx.serialization，也没有 JNI。删掉宽 keep 后 `assembleRelease` 通过，实测量化结果：
+
+```
+dev.loglens.logcat.LogcatParser       -> t4.j        （字段 lastYear -> b）
+dev.loglens.capture.CaptureController -> q4.l
+dev.loglens.diag.DiagRepo             -> s4.o
+rikka.shizuku.Shizuku                 -> rikka.shizuku.Shizuku   （保住）
+dev.loglens.LogApp / MainActivity     -> 原名         （Manifest 组件由 AGP 自动保留）
+```
+
+README 的 R8 描述同步改成「自有类名与方法名会被重命名，只保留 Shizuku 反射要用的那一个第三方方法名」。
+
+**C. `-v year` 时整份文件塌成一条。** `THREADTIME` / `BRIEF` / `DATE_PREFIX` 三处都按 `^\d{2}-\d{2}` 锚定，而 `QuerySyntax.kt:355` 的 `LogTime.full` 早就支持四位年份。带年份的行三个正则都不匹配 → `startsWithTimestamp` 为 false → `parse()` 返回 null → 调用方按续行处理，整份文件挤成一条巨型堆栈。修法：三处正则加 `(?:\d{4}-)?` 前缀；`fullDate()` 加 `parts.size == 3` 直通分支（logcat 自己给了年份就不再按「单调不减」猜），同时同步 `lastYear` / `lastMonth` 缓存，使后续无年份的行仍落在同一年。测试补 4 条（带年份 threadtime、带年份 brief、带年份行不被当续行、带年 / 不带年混排不串年）。`LogcatParserTest` 原来 13 条用例没有一条覆盖年份行，同期 `LogFilterTest` / `QuerySyntaxTest` 却在用 `"2026-11-27 ..."`，测试口径先于实现。
+
+**D1. events 按子串筛包名会串包。** `LogcatEngine` 用 `line.contains(packageName)`，events payload 形如 `[0,4321,com.tencent.mm,u0a123,activity]`，`com.a` 与 `com.abc` 互为前缀时会把别人的事件捞进来。改成边界匹配 `(?<![A-Za-z0-9_.])<pkg>(?![A-Za-z0-9_.])`（包名先 `Regex.escape`），即要求前后不是标识符字符。
+
+**D2. exit-info 没加引号。** `DiagRepo` 里 `dumpsys activity exit-info $pkg 2>&1` 直接拼，而 `ShellRunner` 自己写明包名一律单引号包裹，同文件 `uidOf` / `pidsOf` 都遵守了。已补 `'$pkg'`。合法包名不含引号，所以这不是注入风险，是约定不一致。
+
+**E. 诊断日志永远打印 `fromState=Idle`。** `CaptureController.stop()` 先把 `_state.value` 置 `Idle`，下一行才取 `_state.value.javaClass.simpleName` 打日志，所以除 Failed 分支外永远是 Idle，「从哪个状态停的」这条排查线索长期失效。改成先取 `val fromState = ...simpleName`，再改状态。
+
+**第五条是定位，不是代码。** README 原写「现在只有三条路」+「LogLens 走的是第四条」。这个断言站不住：Shizuku + 手机端抓 logcat 的 Kotlin 工具（LogFox、ShizuLog 一类）已经存在两三年，能力不弱。已改为「常见的是三条路」，并紧跟一段明说「这个组合不是我们首创」，差异化落到**这条路做了多深**（按 uid 抓整族进程而非按 tag、暂停是真断流、网络快照不装 CA、取证包 + 十分区诊断）。不点名具体第三方 App 的策略不变，只承认「同类已存在」。
+
+验证：单测条数 80 → 84（0 失败）、lint 0 error / 87 warning 不变、`assembleRelease` 通过（R8 真跑，mapping 改名如上）、`tools/check_docs.py` 113 处引用全部有效、`tools/pr_review.py --selftest` 70 条不变。
 
 

@@ -157,7 +157,8 @@ object DiagRepo {
     // ───────────────────────── 3. ApplicationExitInfo（137 时间轴） ─────────────────────────
 
     fun exitInfo(pkg: String): Pair<List<Exit>, String> {
-        val r = ShellRunner.exec("dumpsys activity exit-info $pkg 2>&1", 25_000)
+        // 包名按 sh 单引号包裹，和 ShellRunner 自己的约定一致（合法包名不会有引号，但边界要有）
+        val r = ShellRunner.exec("dumpsys activity exit-info '$pkg' 2>&1", 25_000)
         val text = (r.stdout + r.stderr).trim()
         val out = ArrayList<Exit>()
         // Android 17（API 37）的 dumpsys 输出是多行缩进块：

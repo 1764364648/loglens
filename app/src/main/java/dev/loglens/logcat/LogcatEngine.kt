@@ -432,13 +432,16 @@ class LogcatEngine(private val listener: Listener) : LogcatSource {
 
     private fun readEvents(proc: Process, gen: Int) {
         val reader = BufferedReader(InputStreamReader(proc.inputStream, Charsets.UTF_8), 16 * 1024)
+        // 不能用 contains：包名互为前缀（com.a / com.abc）时会把别人的事件也捞进来，
+        // 所以要求包名两侧不是「标识符字符」，而不是任意子串命中
+        val pkgHit = Regex("(?<![A-Za-z0-9_.])" + Regex.escape(packageName) + "(?![A-Za-z0-9_.])")
         try {
             while (true) {
                 val line = reader.readLine() ?: break
                 if (!running.get() || generation != gen) break
                 if (line.isEmpty()) continue
                 // events 的 payload 形如 [0,4321,com.tencent.mm,u0a123,activity]，按包名筛即可
-                if (!line.contains(packageName)) continue
+                if (!pkgHit.containsMatchIn(line)) continue
                 lastDataAt = System.currentTimeMillis()
                 val entry = runCatching { LogcatParser.parse(line) { AppGraph.logs.nextId() } }.getOrNull()
                 if (entry != null) {

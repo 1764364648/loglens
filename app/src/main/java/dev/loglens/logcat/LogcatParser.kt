@@ -41,6 +41,18 @@ object LogcatParser {
         val cached = dateKey
         if (cached == mmdd && dateYear == lastYear && dateMonth == lastMonth) return dateOut
         val parts = mmdd.split("-")
+        // `-v year` 时 logcat 自己带了年份，直接用，不要再按「单调不减」猜一遍
+        if (parts.size == 3) {
+            val y = parts[0].toIntOrNull() ?: return mmdd
+            val m = parts[1].toIntOrNull() ?: return mmdd
+            lastYear = y
+            lastMonth = m
+            dateKey = mmdd
+            dateOut = mmdd
+            dateYear = y
+            dateMonth = m
+            return mmdd
+        }
         val m = parts.getOrNull(0)?.toIntOrNull() ?: return mmdd
         val d = parts.getOrNull(1) ?: "01"
         val now = java.util.Calendar.getInstance()
@@ -65,15 +77,16 @@ object LogcatParser {
     }
 
     private val THREADTIME = Regex(
-        "^(\\d{2}-\\d{2})\\s+(\\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\s+(\\d+)\\s+(\\d+)\\s+([VDIWEFA])\\s+(.*?)\\s*:[ ]?(.*)$"
+        "^((?:\\d{4}-)?\\d{2}-\\d{2})\\s+(\\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\s+(\\d+)\\s+(\\d+)\\s+([VDIWEFA])\\s+(.*?)\\s*:[ ]?(.*)$"
     )
 
     /** events buffer 的 brief 行：`10-27 14:03:22.123 I/am_proc_start( 1234): [0,4321,...]` */
     private val BRIEF = Regex(
-        "^(\\d{2}-\\d{2})\\s+(\\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\s+([VDIWEFA])/(.*?)\\(\\s*(\\d+)\\)\\s*:[ ]?(.*)$"
+        "^((?:\\d{4}-)?\\d{2}-\\d{2})\\s+(\\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\s+([VDIWEFA])/(.*?)\\(\\s*(\\d+)\\)\\s*:[ ]?(.*)$"
     )
 
-    private val DATE_PREFIX = Regex("^\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}")
+    // `-v year` 会在日期前多一个 `yyyy-`；不认它，整行就匹配不上，被当成上一行的续行
+    private val DATE_PREFIX = Regex("^(?:\\d{4}-)?\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}")
 
     private val CRASH_MARKERS = listOf(
         "FATAL EXCEPTION",

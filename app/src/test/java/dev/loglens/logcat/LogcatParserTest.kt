@@ -131,4 +131,39 @@ class LogcatParserTest {
         // pid/tid 非数字的行不匹配 threadtime 正则，因此落到「原始行」分支
         assertTrue(e!!.isRaw)
     }
+
+    // ── -v year：行首多一个 yyyy-，解析器必须认，否则整份文件会被并成一条续行 ──
+
+    @Test
+    fun `带年份的 threadtime 行按年份解析，不再按单调不减猜`() {
+        val e = parse("2026-11-27 14:03:22.123  1234  1250 I ActivityManager: Start proc 1:x/u0a1")!!
+        assertEquals("2026-11-27 14:03:22.123", e.time)
+        assertEquals(1234, e.pid)
+        assertEquals("ActivityManager", e.tag)
+        assertFalse(e.isRaw)
+    }
+
+    @Test
+    fun `带年份的 events brief 也能解析`() {
+        val e = parse("2026-11-27 14:03:22.123 I/am_proc_start( 1234): [0,4321,com.a,activity]")!!
+        assertEquals("2026-11-27 14:03:22.123", e.time)
+        assertEquals("am_proc_start", e.tag)
+        assertEquals(0, e.tid)
+    }
+
+    @Test
+    fun `带年份的行不会被当成续行`() {
+        assertTrue(LogcatParser.startsWithTimestamp("2026-11-27 14:03:22.123 x"))
+        val e = parse("2026-11-27 14:03:22.123 不是 threadtime 也不是 brief")!!
+        assertTrue(e.isRaw)
+    }
+
+    @Test
+    fun `带年份与不带年份混排时年份不串`() {
+        val withYear = parse("2026-11-27 14:03:22.123  1  1 I T: a")!!
+        assertEquals("2026", withYear.time.substring(0, 4))
+        // 后一行没有年份，应沿用刚由 -v year 确立的年份，而不是回落到「今年」
+        val noYear = parse("11-28 10:00:00.000  1  1 I T: b")!!
+        assertEquals("2026", noYear.time.substring(0, 4))
+    }
 }

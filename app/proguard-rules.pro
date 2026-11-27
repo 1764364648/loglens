@@ -4,10 +4,11 @@
 -dontwarn rikka.shizuku.**
 -dontwarn moe.shizuku.**
 
-# 反射/服务端桩（ShizukuProcess 用 declaredMethods + isAccessible 反射 newProcess）
--keep class dev.loglens.** { *; }
+# 反射入口（ShizukuProcess 用 declaredMethods + isAccessible 反射拿 newProcess）。
+# 只需保住这个第三方方法名；原来那条 -keep class dev.loglens.** { *; }
+# 会把自有类名和方法名全部保留，等于没开混淆，已删。
 -keepclassmembers class rikka.shizuku.Shizuku {
-    public static *** newProcess(...);
+    *** newProcess(...);
 }
 
 # R8：发布包剥离 Log.v / Log.d / Log.i 与 isLoggable，保留 w / e / wtf
