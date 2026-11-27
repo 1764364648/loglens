@@ -170,16 +170,16 @@ private fun report(bundle: DiagBundle?, pkg: String, label: String): String {
     if (anr == null || anr.items.isEmpty()) {
         sb.appendLine(anr?.whyEmpty?.trim()?.ifBlank { "无 ANR 记录" } ?: "未采集")
     } else {
-        sb.appendLine("结构化 ${anr.structuredCount} 条 / 文本兜底 ${anr.textCount} 条")
+        sb.appendLine("结构化 ${anr.structuredCount} 条 / dumpsys ${anr.dumpCount} 条 / 文本兜底 ${anr.textCount} 条")
         anr.byType.forEach { (t, c) -> sb.appendLine("  $t × $c") }
         anr.items.forEach { a ->
             sb.appendLine(
-                "${DiagRepo.fmtFull(a.at)} ${a.process}  type=${a.typeName}(${a.anrType}) " +
+                "${if (a.at <= 0L) "时间未给出" else DiagRepo.fmtFull(a.at)} ${a.process}  type=${a.typeName}(${a.anrType}) " +
                     "anrId=${a.anrId} 超时阈值=${a.timeoutText} 用户可感知=${a.userPerceptible} [${a.source}]" +
                     (if (a.description.isBlank()) "" else " · ${a.description}")
             )
         }
-        if (!anr.hasStructure) sb.appendLine("注：以上为 dumpsys 文本兜底，无类型/阈值等归因字段。")
+        if (!anr.hasStructure) sb.appendLine("注：以上不是系统给的 AnrInfo 字段，dumpsys 那行按 reason 文本推断，可能为空。")
     }
     sb.appendLine()
     sb.appendLine("[事件时间轴]")
@@ -455,7 +455,7 @@ fun DiagScreen(
                     anr == null -> "未采集到 ANR 归因（采集阶段异常，见本页顶部「采集告警」）。"
                     anr.items.isEmpty() -> anr.whyEmpty.trim()
                     else -> buildString {
-                        appendLine("结构化 ${anr.structuredCount} 条（API 37 AnrInfo） · 文本兜底 ${anr.textCount} 条")
+                        appendLine("结构化 ${anr.structuredCount} 条（API 37 AnrInfo） · dumpsys ${anr.dumpCount} 条 · 文本兜底 ${anr.textCount} 条")
                         if (anr.byType.isNotEmpty()) {
                             appendLine()
                             appendLine("类型分布：")
@@ -463,13 +463,13 @@ fun DiagScreen(
                         }
                         appendLine()
                         anr.items.reversed().take(10).forEach { a ->
-                            appendLine("${DiagRepo.fmtFull(a.at)}  ${a.process}")
+                            appendLine("${if (a.at <= 0L) "时间未给出" else DiagRepo.fmtFull(a.at)}  ${a.process}")
                             appendLine("    type=${a.typeName}(${a.anrType})  anrId=${a.anrId}  超时阈值=${a.timeoutText}  用户可感知=${a.userPerceptible}  [${a.source}]")
                             appendLine("    ${a.typeHint}")
                         }
                         if (!anr.hasStructure) {
                             appendLine()
-                            appendLine("注：只拿到 dumpsys 文本兜底，类型/阈值/可感知全空 —— 说明 API 直读与 shell 直读两条通道都没通，下面写了原因。")
+                            appendLine("注：没有拿到系统 AnrInfo 字段。dumpsys lastanr 那行是按 Reason 文本推断的（类型/阈值由关键字匹配），推断不到就留空。")
                         }
                         val why = anr.whyEmpty.trim()
                         if (why.isNotEmpty()) {

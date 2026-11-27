@@ -158,16 +158,23 @@
 
 ### 需要真机/环境才能定性的项
 
-> **2026-11-27 更新**：其中可离线落地的不再挂着 —— CSV 公式注入已加前导单引号；`Forensics` 复制到 Download 的文件名改为带时间戳（不再覆盖同名）；浮窗拖动松手收敛回屏幕内；`NetScreen`/`AppPickerScreen` 补 `imePadding`；`LogcatParser.resetClock()` 在每次 `LogcatEngine.start()` 时调用。剩下 `AnrRepo/AnrCli` 与 `/proc/net` 两条本质依赖具体 ROM 行为，保留在此。
+> **2026-11-27 更新**：其中可离线落地的不再挂着 —— CSV 公式注入已加前导单引号；`Forensics` 复制到 Download 的文件名改为带时间戳（不再覆盖同名）；浮窗拖动松手收敛回屏幕内；`NetScreen`/`AppPickerScreen` 补 `imePadding`；`LogcatParser.resetClock()` 在每次 `LogcatEngine.start()` 时调用。
+>
+> 同日再补两条：`AnrRepo` 的 shell 通道换成 `dumpsys activity lastanr`（`app_process` + 反射隐藏 `IActivityManager` 那条已删除，理由见下）；`/proc/net` 的可读性查清并实测，不再按「取决于 ROM」挂着。现在这一节只剩「需要真实 ANR/翻转事件才能观察」的观感项，不再有「技术上不知道能不能用」的项。
+>
+> - `dumpsys activity lastanr` 是 ActivityManagerService 自带的公开 dump 参数，shell(uid 2000) 直接可调，不需要 DUMP 权限、不碰 hidden API。本机实测（`adb shell dumpsys activity lastanr`，API 37）返回 `ACTIVITY MANAGER LAST ANR` 段与 `<no ANR has occurred since boot>` 空槽，说明命令与格式都在。
+> - 原来的 `app_process` 路线确认是死路：Android 10 起非 SDK 接口屏蔽把 `IActivityManager$Stub.asInterface` 从反射方法表里摘掉（Android 9 有、10 起 `NoSuchMethodException`），`AnrCli` 又靠 `CLASSPATH=<apk>` 复用 App 的 dex，ART 初始化在非 zygote 进程里还会撞 `Typeface`/`Paint.nInit`。文件已删。
+> - `/proc/net/{tcp,tcp6,udp,udp6}` 的封锁是 SELinux 层：AOSP `system/sepolicy/public/app.te` 写的是 `neverallow { appdomain -shell } proc_net_tcp_udp:file *`，即除 shell 域外的所有应用域禁止读 —— **shell 被显式排除在封锁之外**。本机实测同一条命令能看到 `uid 1000` 的连接（shell 自身是 2000），跨 uid 可见，`NetSnapshot` 现有的 shell 读取路径是成立的设计。
+> - 仍属「看实际表现」而非「能不能用」：真正发生 ANR 时 `lastanr` 段里 Reason 的措辞各版本不同（只做确定性关键字推断，认不出就留空）；预录自动接回、折叠区间跳转这类要靠 Shizuku 实时采集链路才能观察。
 
-- `diag/AnrRepo.kt:167-172` + `diag/cli/AnrCli.kt:99-133`：依赖 `CLASSPATH=<apk> app_process` 与隐藏 `IActivityManager` 反射，代码有 `ERR|` 文本兜底，但能否在目标 ROM/Android 17 上真正返回结构化 ANR 字段需要真机执行验证；`AnrCli.buildArgs` 的 `(0, 40, 0)` int 参数顺序也只是按常见重载推断。
-- `data/NetSnapshot.kt:50-51`：依赖 shell 读取 `/proc/net/{tcp,tcp6,udp,udp6}`，Android 16/17 的部分 ROM/SELinux 策略下可能不可读；已有“读不到 /proc/net”兜底。
-- `ui/NetScreen.kt:216-244` 与 `ui/AppPickerScreen.kt`：targetSdk 36 强制 edge-to-edge 后，输入框/底栏的 IME insets 未显式消费（全仓库无 `imePadding`），键盘遮挡需要在 Android 15/16 真机确认。
-- `util/ExportFormats.kt:159-164`：CSV 单元格未中和 `= + - @` 开头内容，被调试应用可写入公式；是否纳入威胁模型取决于导出文件的使用方式，未擅自改变导出格式。
-- `diag/Forensics.kt:194`：复制到 `/sdcard/Download/shower.log` 固定文件名，会覆盖同名文件；是否需要唯一化命名是产品取舍。
-- `service/OverlayLogService.kt:155-193`：浮窗拖动没有 `ACTION_UP` 边界收敛且使用 `FLAG_LAYOUT_NO_LIMITS`，可被拖出屏幕；属于交互设计问题，未改。
+- `diag/AnrRepo.kt`：shell 通道已改为 `dumpsys activity lastanr` 解析（`parseLastAnr`/`typeFromReason`/`timeoutFromReason` 有 6 条单测覆盖）。类型与阈值是按 Reason 文本推断的，记录标 `dumpsys lastanr` 来源，不冒充 API 字段；`ANR in ...` 的进程名两种写法（`<pkg>` 与 `<pkg> (<process>)`）都吃，最近一次不属于目标包时明确留空、不串包。
+- `data/NetSnapshot.kt:50-51`：shell 读 `/proc/net/{tcp,tcp6,udp,udp6}` 已按上面的 sepolicy 依据核实可行，代码保留「读不到 /proc/net」兜底以应对厂商额外收紧。
+- `ui/NetScreen.kt:216-244` 与 `ui/AppPickerScreen.kt`：`imePadding` 已补，仍建议在 Android 15/16 真机上看一眼键盘遮挡的实际观感。
+- `util/ExportFormats.kt:159-164`：CSV 前导单引号已加（见上一节 24 条的第 24 号）。
+- `diag/Forensics.kt:194`：Download 文件名已带时间戳。
+- `service/OverlayLogService.kt:155-193`：拖动已收敛回屏幕内。
 - `CaptureService` 的 `State.Failed` 不是服务终止条件：失败后前台服务与通知会保留，直到用户停止；需要真机确认通知被划掉后的系统行为再定。
-- `LogcatParser` 的跨年推断状态为进程级单例且 `resetClock()` 无调用点；设备时间被手动改动时可能给出错误年份，未构造出确定复现路径。
+- `LogcatParser` 的跨年推断状态为进程级单例：`resetClock()` 已在每次 `LogcatEngine.start()` 调用（见上一节 24 条的第 18 号）。
 
 ### lint 相关（当时剩 3 条未改，后续已全部修掉）
 
@@ -186,7 +193,7 @@
 - **logcat 解析/采集**：`LogcatParser` 的年份缓存有 `@Synchronized`；stdout/events 两条流并发解析不会破坏共享状态；`LogcatEngine` 的 argv 数组交给 Shizuku，不经过 shell 字符串拼接；`--uid=` 只由整数 uid 构成，不存在注入；客户端 pid 复核与服务端 `--uid` 双保险逻辑一致；`FileLogWriter` 队列有界、轮转/保留份数已实现。
 - **数据层**：`LogRepository` 的 buffer/pending/统计由同一把锁保护，`attach()` 原子清空 pending 避免 LazyColumn 重复 key；`AppRepository.loadInstalled` 在 `Dispatchers.IO`；`Prefs` 的数值项都有 `coerceIn`，无明文凭据；`IssueRules` 预筛关键词与规则表数量有 `require` 校验、正则只编译一次；`HighlightRules` 非法正则/颜色会安全跳过。
 - **导出/分享**：`ExportFormats` 的 TXT/CSV/JSON/HTML/ZIP/PDF 都有上限或异常兜底；CSV 有 BOM 与引号转义，JSON/HTML 有转义；分享统一走 FileProvider + `FLAG_GRANT_READ_URI_PERMISSION`；文件名只由包名/时间戳组成，无路径穿越。
-- **诊断/取证**：`DiagRepo` 的 `ps` 字段索引、`/proc/<pid>/stat` 第 22 字段处理、`ApplicationExitInfo` 多行块聚合、`Forensics` 的 POSIX 引号函数与 `run-as` 路径处理均正确；`readHead` 对 shell 单引号做了转义；`diag/cli/AnrCli` 在独立 `app_process` 中运行，未捕获异常只会输出 `ERR|`。
+- **诊断/取证**：`DiagRepo` 的 `ps` 字段索引、`/proc/<pid>/stat` 第 22 字段处理、`ApplicationExitInfo` 多行块聚合、`Forensics` 的 POSIX 引号函数与 `run-as` 路径处理均正确；`readHead` 对 shell 单引号做了转义；`AnrRepo` 的 dumpsys 通道是纯文本解析，失败只写进说明字段，不抛出。
 - **网络快照**：`NetSnapshot` 的 `/proc/net` 列下标、32 位字小端翻转、IPv4/IPv6 长度判断、端口 `toIntOrNull(16)` 都对；解析失败跳过而不猜；不依赖 `ss`/`netstat` 文本。
 - **Compose 生命周期**：`LaunchedEffect`/`rememberCoroutineScope` 随 composition 取消；没有动态注册 Receiver/ContentObserver；暂停/继续状态与前台通知状态同步；返回回调与 `enableOnBackInvokedCallback` 兼容；`Components`/`Theme`/`MiuixCompat` 未发现崩溃或状态问题。
 

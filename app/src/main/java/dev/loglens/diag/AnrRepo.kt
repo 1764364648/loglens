@@ -18,17 +18,18 @@ import dev.loglens.shizuku.ShellRunner
  *  1. API 直读：本 App 进程直接调 ActivityManager.getHistoricalProcessExitReasons() + getAnrInfo()。
  *     查别的包需要 DUMP 或「使用情况访问」权限，普通 App 通常会被 SecurityException 拦下——
  *     因此失败不算异常，只作为一条「为什么没读到」的说明保留。
- *  2. shell 直读：借 Shizuku 的 shell(uid 2000) 跑 app_process，用同一套 API 读（shell 持有 DUMP）。
- *     这一步才是不加权限也能拿到第三方包 AnrInfo 的通道。
- *  3. 文本兜底：前两条都失效时，退回到 dumpsys 文本里的 reason=ANR 记录，只保留时间与进程，
+ *  2. shell 直读：借 Shizuku 的 shell(uid 2000) 跑 `dumpsys activity lastanr`，读系统自己打的
+ *     最近一次 ANR 段落（pid / reason / 进程），再按 reason 文本推断 ANR 类型与超时阈值。
+ *     不再走 `app_process` + 反射 `IActivityManager`：Android 10 起非 SDK 接口屏蔽会把
+ *     `IActivityManager$Stub.asInterface` 直接从方法表里掐掉（反射报 NoSuchMethodException），
+ *     这条路在各版本上都靠不住；dumpsys 是公开的 dump 通道，shell 身份直接可调。
+ *  3. 文本兜底：前两条都失效时，退回到 dumpsys exit-info 里的 reason=ANR 记录，只保留时间与进程，
  *     归因字段留空并明确标注「文本兜底，无归因字段」。
- *
- * 全部反射执行，不依赖 android.jar 里的隐藏 IActivityManager，低版本系统上也不会类校验失败。
  */
 object AnrRepo {
 
     const val SOURCE_API = "API 直读"
-    const val SOURCE_SHELL = "shell 直读"
+    const val SOURCE_SHELL = "dumpsys lastanr"
     const val SOURCE_TEXT = "文本兜底"
 
     /** 一条 ANR 归因记录。anrId/anrType/timeoutMs 为 -1 表示该通道没给出来。 */
@@ -53,7 +54,8 @@ object AnrRepo {
         val shellError: String?,
         val raw: String
     ) {
-        val structuredCount: Int get() = items.count { it.source != SOURCE_TEXT }
+        val structuredCount: Int get() = items.count { it.source == SOURCE_API }
+        val dumpCount: Int get() = items.count { it.source == SOURCE_SHELL }
         val textCount: Int get() = items.count { it.source == SOURCE_TEXT }
         val byType: List<Pair<String, Int>>
             get() = items.filter { it.anrType >= 0 }
@@ -66,13 +68,20 @@ object AnrRepo {
         val whyEmpty: String
             get() = buildString {
                 if (items.isEmpty()) {
-                    appendLine("没有读到 ANR 记录（近 40 条退出记录里没有 reason=ANR）。")
+                    appendLine("没有读到 ANR 记录（近 40 条退出记录里没有 reason=ANR，dumpsys 也没给最近一次）。")
                     apiError?.let { appendLine("· API 直读：$it") }
-                    shellError?.let { appendLine("· shell 直读：$it") }
+                    shellError?.let { appendLine("· dumpsys lastanr：$it") }
                 } else {
-                    if (!hasStructure) appendLine("只有文本兜底记录，归因字段（类型/阈值/可感知）缺失。")
+                    if (!hasStructure) {
+                        appendLine(
+                            if (dumpCount > 0)
+                                "归因来自 dumpsys lastanr 的文本（类型/阈值按 reason 推断，不是系统给的字段）。"
+                            else
+                                "只有文本兜底记录，归因字段（类型/阈值/可感知）缺失。"
+                        )
+                    }
                     apiError?.let { appendLine("· API 直读失败：$it") }
-                    shellError?.let { appendLine("· shell 直读失败：$it") }
+                    shellError?.let { appendLine("· dumpsys lastanr：$it") }
                 }
             }
     }
@@ -88,10 +97,10 @@ object AnrRepo {
         var shellList = emptyList<Anr>()
         var shellErr: String? = null
         if (api.first.isEmpty()) {
-            val shell = viaShell(context, pkg)
+            val shell = viaDumpsys(pkg)
             shellList = shell.first
             shellErr = shell.second
-            shell.second?.let { notes.appendLine("shell: $it") }
+            shell.second?.let { notes.appendLine("dumpsys: $it") }
         }
 
         val structured = (api.first + shellList).distinctBy { "${it.at}/${it.process}/${it.anrId}/${it.anrType}" }
@@ -137,7 +146,7 @@ object AnrRepo {
                 out.add(
                     Anr(
                         at = e.timestamp,
-                        process = e.processName ?: "?",
+                        process = e.processName.ifBlank { "?" },
                         anrId = ai.anrId,
                         anrType = ai.anrType,
                         timeoutMs = ai.timeoutMillis,
@@ -153,59 +162,80 @@ object AnrRepo {
         }
     }
 
-    // ───────────────────────── 通道 2：shell(uid 2000) app_process 直读 ─────────────────────────
+    // ─────────────────── 通道 2：shell(uid 2000) 读 dumpsys activity lastanr ───────────────────
 
-    private fun viaShell(context: Context, pkg: String): Pair<List<Anr>, String?> {
-        if (Build.VERSION.SDK_INT < 37) {
-            return emptyList<Anr>() to "系统 < Android 17（API 37），shell 通道同样没有 AnrInfo"
-        }
-        val selfApk = runCatching {
-            context.packageManager.getApplicationInfo(context.packageName, 0).sourceDir
-        }.getOrNull() ?: return emptyList<Anr>() to "拿不到本应用 APK 路径"
-        if (selfApk.isBlank()) return emptyList<Anr>() to "本应用 APK 路径为空"
-
-        val cmd = buildString {
-            append("CLASSPATH='").append(selfApk).append("' ")
-            append("/system/bin/app_process /system/bin ")
-            append("dev.loglens.diag.cli.AnrCli '").append(pkg).append("'")
-            append(" 2>&1")
-        }
-        val r = runCatching { ShellRunner.exec(cmd, 20_000) }.getOrElse {
+    /** 借 Shizuku 的 shell 身份调系统 dump：不需要隐藏 API，也不需要 DUMP 权限。 */
+    fun viaDumpsys(pkg: String): Pair<List<Anr>, String?> {
+        val r = runCatching { ShellRunner.exec("dumpsys activity lastanr", 20_000) }.getOrElse {
             return emptyList<Anr>() to ("执行失败：" + (it.message ?: it.javaClass.simpleName))
         }
         val text = (r.stdout + "\n" + r.stderr).trim()
-        val out = ArrayList<Anr>()
-        var err: String? = null
-        var sawOk = false
-        text.lineSequence().forEach { line ->
-            val t = line.trim()
-            when {
-                t.startsWith("ANR|") -> {
-                    val f = t.split("|")
-                    if (f.size >= 7) {
-                        out.add(
-                            Anr(
-                                at = f[1].toLongOrNull() ?: 0L,
-                                process = f[2].ifBlank { "?" },
-                                anrId = f[3].toIntOrNull() ?: -1,
-                                anrType = f[4].toIntOrNull() ?: -1,
-                                timeoutMs = f[5].toLongOrNull() ?: -1L,
-                                userPerceptible = f[6] == "1",
-                                description = f.getOrNull(7)?.trim().orEmpty(),
-                                source = SOURCE_SHELL
-                            )
-                        )
-                    }
-                }
-                t.startsWith("OK|") -> sawOk = true
-                t.startsWith("ERR|") -> err = t.removePrefix("ERR|").trim()
-            }
+        if (text.isEmpty()) {
+            return emptyList<Anr>() to "dumpsys 没有输出，确认 Shizuku 还在运行"
         }
-        if (!sawOk && err == null) {
-            val tail = text.lineSequence().filter { it.isNotBlank() }.toList().takeLast(3).joinToString(" / ")
-            err = "app_process 没有返回任何结构化结果：" + tail.ifBlank { "无输出" }
+        return parseLastAnr(text, pkg)
+    }
+
+    /**
+     * 解析 `dumpsys activity lastanr` 的纯文本：抽进程、PID、Reason，再按 reason 里的关键字
+     * 推断 ANR 类型与超时阈值。推断出来的东西一律标 SOURCE_SHELL，不冒充系统给的字段。
+     */
+    fun parseLastAnr(raw: String, pkg: String): Pair<List<Anr>, String?> {
+        if (raw.contains("<no ANR has occurred since boot>", ignoreCase = true)) {
+            return emptyList<Anr>() to "开机以来没有发生过 ANR"
         }
-        return out to err
+        val m = Regex("""ANR in\s+([^\s(]+)(?:\s*\(([^)]+)\))?""").find(raw) ?: run {
+            val tail = raw.lineSequence().filter { it.isNotBlank() }.take(2).joinToString(" / ")
+            return emptyList<Anr>() to ("没认出 ANR 段：" + tail.ifBlank { "空" })
+        }
+        val outer = m.groupValues[1].trim()
+        val inner = m.groupValues.getOrNull(2)?.trim().orEmpty()
+        val proc = (if (inner.isNotBlank()) inner else outer).ifBlank { "?" }
+        val headPkg = outer.substringBefore(":")
+        if (headPkg != pkg && !raw.contains("$pkg/") && !raw.contains("($pkg)")) {
+            return emptyList<Anr>() to "最近一次 ANR 是「$outer」，不是目标包 $pkg"
+        }
+        val pid = Regex("""PID: (\d+)""").find(raw)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+        val reason = Regex("""Reason: (.+)""").find(raw)?.groupValues?.get(1)?.trim().orEmpty()
+        val anr = Anr(
+            at = 0L,
+            process = proc.replace("|", "/"),
+            anrId = -1,
+            anrType = typeFromReason(reason),
+            timeoutMs = timeoutFromReason(reason),
+            userPerceptible = false,
+            description = (if (pid > 0) "PID $pid · " else "") + reason.replace("|", "/"),
+            source = SOURCE_SHELL
+        )
+        return listOf(anr) to null
+    }
+
+    /** reason 文本 → AnrTypes 编码；匹配不上返回 -1（UI 显示「未归因」）。 */
+    fun typeFromReason(reason: String): Int {
+        val r = reason.lowercase()
+        return when {
+            r.contains("no focused window") || r.contains("no window has focus") -> 1
+            r.contains("input dispatching") || r.contains("motionevent") || r.contains("keyevent") -> 2
+            r.contains("startforegroundservice") -> 4
+            r.contains("executing service") -> 5
+            r.contains("broadcast of intent") || r.contains("broadcast") -> 3
+            r.contains("contentprovider") || r.contains("provider ") -> 6
+            r.contains("triggered") || r.contains("app not responding") -> 7
+            r.contains("short foreground service") -> 8
+            r.contains("jobservice") -> 9
+            r.contains("bindapplication") || r.contains("application start") -> 10
+            else -> -1
+        }
+    }
+
+    /** 从 reason 里抓「Waited 5000ms」这类阈值；抓不到给 -1，UI 显示「未给出」。 */
+    fun timeoutFromReason(reason: String): Long {
+        val ms = Regex("""Waited\s+(\d{2,6})\s*ms""", RegexOption.IGNORE_CASE).find(reason)
+            ?: Regex("""(\d{3,6})\s*ms""", RegexOption.IGNORE_CASE).find(reason)
+        ms?.let { return it.groupValues[1].toLongOrNull() ?: -1L }
+        val s = Regex("""(\d{1,3})\s*s""", RegexOption.IGNORE_CASE).find(reason)
+        s?.let { return (it.groupValues[1].toLongOrNull() ?: 0L) * 1000L }
+        return -1L
     }
 
     // ───────────────────────── AnrTypes 映射 ─────────────────────────
