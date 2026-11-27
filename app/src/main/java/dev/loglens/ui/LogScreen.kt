@@ -273,16 +273,17 @@ fun LogScreen(
         if (uri != null) {
             val name = uri.lastPathSegment?.substringAfterLast('/') ?: "导入的日志"
             Thread {
-                val text = runCatching {
-                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                }.getOrNull()
-                val parsed = if (text == null) emptyList() else OfflineImport.parse(text)
+                val parsed = runCatching {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()
+                        ?.use { OfflineImport.parse(it) }
+                }.getOrNull() ?: emptyList()
                 Handler(Looper.getMainLooper()).post {
                     if (parsed.isEmpty()) {
                         Toast.makeText(context, "没解析出日志行，确认是 logcat 文本", Toast.LENGTH_SHORT).show()
                     } else {
                         OfflineLog.load(parsed, name)
-                        Toast.makeText(context, "已载入 ${parsed.size} 行：$name", Toast.LENGTH_SHORT).show()
+                        val tail = if (parsed.size >= 200_000) "（超过 20 万行，只取前面这一段）" else ""
+                        Toast.makeText(context, "已载入 ${parsed.size} 行：$name$tail", Toast.LENGTH_SHORT).show()
                     }
                 }
             }.start()
@@ -1282,7 +1283,7 @@ private fun LogDialogs(
                 // 这里内部解析后进离线视图，过滤与搜索照常可用。
                 Thread {
                     val parsed = runCatching {
-                        OfflineImport.parse(item.file.readText())
+                        item.file.bufferedReader().use { OfflineImport.parse(it) }
                     }.getOrDefault(emptyList())
                     Handler(Looper.getMainLooper()).post {
                         if (parsed.isEmpty()) {

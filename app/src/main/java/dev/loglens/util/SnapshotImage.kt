@@ -68,13 +68,15 @@ object SnapshotImage {
             textSize = 9.5f * density
             isAntiAlias = true
         }
-        val maxChars = ((width - padX * 2) / (body.textSize * 0.6f)).toInt().coerceAtLeast(24)
+        // 截图宽度是按实测文本宽算的，但截断也得按实测：0.6em 是拉丁字符经验值，CJK 是全宽 1em，
+        // 按字数截会让中文行画到画布外（右侧被直接切掉，连省略号都没有）
+        val maxW = (width - padX * 2).toFloat()
         var y = headerH + padY + 9f * density
         for (e in rows) {
             body.color = colorOf(e.level.priority)
             val text = (if (e.time.isNotBlank()) e.time.takeLast(12) + " " else "") +
                 e.level.letter + " " + e.tag + " " + e.message.replace("\n", " ")
-            canvas.drawText(clip(text, maxChars), padX.toFloat(), y, body)
+            canvas.drawText(clipToWidth(text, body, maxW), padX.toFloat(), y, body)
             y += lineH
         }
 
@@ -96,8 +98,13 @@ object SnapshotImage {
         return max.toInt()
     }
 
-    private fun clip(text: String, max: Int): String =
-        if (text.length <= max) text else text.take(max - 1) + "…"
+    /** 按实测宽度截断，超宽加省略号 */
+    private fun clipToWidth(text: String, paint: Paint, maxW: Float): String {
+        if (paint.measureText(text) <= maxW) return text
+        val room = maxW - paint.measureText("…")
+        val n = paint.breakText(text, true, room.coerceAtLeast(1f), null).coerceAtLeast(1)
+        return text.take(n) + "…"
+    }
 
     private fun colorOf(priority: Int): Int = when {
         priority >= 6 -> Color.parseColor("#FF5C7A")

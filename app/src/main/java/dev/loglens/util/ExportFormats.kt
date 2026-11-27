@@ -158,8 +158,15 @@ object ExportFormats {
 
     private fun csvCell(raw: String): String {
         if (raw.isEmpty()) return ""
-        val needQuote = raw.any { it == ',' || it == '"' || it == '\n' || it == '\r' }
-        val escaped = raw.replace("\"", "\"\"")
+        // CSV 公式注入：Excel/WPS 会把 = + - @ 或 tab/CR 开头的单元格当公式执行。加一个前导单引号
+        // 让它按文本处理——Excel 不显示这个引号，内容看起来不变，但不会被执行
+        val risky = when (raw.first()) {
+            '=', '+', '-', '@', '\t', '\r' -> true
+            else -> false
+        }
+        val text = if (risky) "'" + raw else raw
+        val needQuote = text.any { it == ',' || it == '"' || it == '\n' || it == '\r' }
+        val escaped = text.replace("\"", "\"\"")
         return if (needQuote) "\"$escaped\"" else escaped
     }
 
@@ -230,7 +237,10 @@ object ExportFormats {
             val pageH = 595
             val margin = 22f
             val lineH = 9.6f
-            val maxChars = ((pageW - margin * 2) / (body.textSize * 0.62f)).toInt().coerceAtLeast(60)
+            // 折行必须按实测宽度，不能按字数估：0.62em 是等宽字体里拉丁字符的宽度，CJK 在 MONOSPACE
+            // 下是全宽 1em，按 (798 / 4.588) = 173 字切一行，实际画出来是 173 × 7.4 = 1280pt，
+            // 可用宽度只有 798pt，右侧约 40% 直接跑到纸外（中文日志、JSON、URL 一行就中招）
+            val maxW = pageW - margin * 2f
 
             var pageNo = 1
             var page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNo).create())
@@ -261,10 +271,12 @@ object ExportFormats {
                 val text = prefix + e.message.replace("\r", " ")
                 var rest = text
                 while (rest.isNotEmpty()) {
-                    val cut = if (rest.length <= maxChars) rest.length else {
-                        val slice = rest.substring(0, maxChars)
-                        val brk = slice.lastIndexOf(' ')
-                        if (brk > maxChars * 0.6) brk else maxChars
+                    // breakText 返回「在这个宽度里放得下多少个字符」，CJK / 拉丁 / 混合都准
+                    var cut = if (rest.length < 2) rest.length else body.breakText(rest, true, maxW, null)
+                    if (cut <= 0) cut = 1
+                    if (cut < rest.length) {
+                        val brk = rest.lastIndexOf(' ', cut)
+                        if (brk > cut * 0.6) cut = brk
                     }
                     if (y > pageH - margin) newPage()
                     canvas.drawText(rest.substring(0, cut), margin, y, body)

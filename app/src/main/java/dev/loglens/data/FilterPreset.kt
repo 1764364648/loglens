@@ -100,7 +100,9 @@ object PresetStore {
 
     fun load(prefs: Prefs): List<FilterPreset> {
         cache?.let { return it.toList() }
-        val list = ArrayList<FilterPreset>()
+        // 内置预设必须打头：以前只读用户存的那份 JSON，首次安装时预设 chip 是空的，
+        // builtins() 写了七条却全仓库零调用
+        val list = ArrayList<FilterPreset>(FilterPreset.builtins())
         val raw = prefs.filterPresetsJson
         if (raw.isNotBlank()) {
             runCatching {
@@ -116,7 +118,8 @@ object PresetStore {
 
     fun save(prefs: Prefs, presets: List<FilterPreset>) {
         val user = presets.filter { !it.builtin }.take(MAX_USER)
-        cache = user.toMutableList()
+        // 缓存留全量（内置 + 用户），落盘只写用户那份：内置不写进 prefs，改内置文案时才不用迁移旧数据
+        cache = (FilterPreset.builtins() + user).toMutableList()
         val arr = JSONArray()
         for (p in user) arr.put(p.toJson())
         prefs.filterPresetsJson = arr.toString()

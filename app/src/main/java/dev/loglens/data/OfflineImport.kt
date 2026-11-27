@@ -34,10 +34,21 @@ object OfflineImport {
 
     fun parse(text: String, maxLines: Int = 200_000): List<LogEntry> {
         if (text.isBlank()) return emptyList()
+        return parseLines(text.lineSequence(), maxLines)
+    }
+
+    /**
+     * 流式导入：日志文件动辄几十上百 MB，先 readText() 读成 String 再切行等于把整份文件 ×2 塞进内存，
+     * 几百 MB 直接 OOM。这里逐行消费，读满 maxLines 就停，内存只跟结果条数有关。
+     */
+    fun parse(reader: java.io.BufferedReader, maxLines: Int = 200_000): List<LogEntry> =
+        parseLines(reader.lineSequence(), maxLines)
+
+    private fun parseLines(lines: Sequence<String>, maxLines: Int): List<LogEntry> {
         val out = ArrayList<LogEntry>(1024)
         var last: LogEntry? = null
         var id = 0L
-        for (raw in text.lineSequence()) {
+        for (raw in lines) {
             if (out.size >= maxLines) break
             if (raw.isEmpty()) continue
             val t = threadTime.find(raw)

@@ -32,7 +32,7 @@ LogLens 走的是第四条：Shizuku 已经把 shell 身份给你了（Android 1
 | 需要 root | 不要，但要 USB/无线调试 | 因 App 而异 | 不要 | **不要（Shizuku 即可）** |
 | 按「目标应用」过滤 | 手写 `--uid` / `--pid` | 看实现 | 只能看自己 | **选应用即过滤，抓整族进程** |
 | Android 16 常驻胶囊 / 灵动岛 | 无 | 无 | 无 | **有，且胶囊可暂停/继续** |
-| 崩溃 / ANR 专门链路 | 自己翻 | 自己翻 | 无 | **崩溃归集 + 问题体检 + 九分区诊断** |
+| 崩溃 / ANR 专门链路 | 自己翻 | 自己翻 | 无 | **崩溃归集 + 问题体检 + 十分区诊断** |
 | 网络问题定位 | 另开抓包工具 | 无 | 无 | **按应用连接时间轴（不装 CA）** |
 | 手机端导出分享 | 复制粘贴 | 有限 | 无 | **txt / csv / json / zip / 长图** |
 | 体积 / 联网 | — | 数 MB 起 | — | **2.2 MB，零联网** |
@@ -134,6 +134,8 @@ keyPassword=******
 - 部分 ROM（荣耀 / 华为）默认关掉 AP 日志，需要拨号盘工程码打开，App 内会给出引导
 - 深度诊断里「应用私有目录」的内部 `files/`、`cache/` 要靠 `run-as` 读，目标 App 不是 debuggable 时只能看到 `/sdcard/Android/data/<pkg>` 那一层
 - 崩溃存档读的是系统 dropbox（`dumpsys dropbox --print`），能拿到 Java 崩溃、native 崩溃、ANR 的文本存档，**不需要 root**，logcat 滚掉之后仍然在。但原文不在这一层：`/data/anr`、`/data/tombstones`、`/data/system/procexitstore/*.gz` 这三处 shell 直接读都被拒（实测 Permission denied，走 `ApplicationExitInfo.getTraceInputStream()` 也只对进程自己的 uid 放行，shell 拿到的是 null）。要原文只有两条路：`bugreport`——dumpstate 以 root 身份收集，zip 里直接带 `FS/data/anr/*` 与 `FS/data/tombstones/*`；或者 root。本工具走第一条：ANR 卡上的「抓 ANR 原文」跑一次 `bugreportz`（约 1 分钟、几十 MB 的包），从 `FS/data/anr/anr_*` 里按 `Cmd line:` 把目标包（含 `:子进程`）的线程栈原文解出来；包留在 shell 的 bugreports 目录，页面上可一键删。
+- 离线导入按行流式读，上限 20 万行：几百 MB 的 txt 不会再被整份读进内存（以前是 `readText()` 无上限，直接 OOM）
+- CSV 导出给 `=` `+` `-` `@` 开头的单元格加一个前导单引号，避免 Excel/WPS 当公式执行；表格里看不出来，原文不变
 - 不做完整抓包：VpnService + 自签 CA 必然撞 pinning，所以网络页只做连接快照
 - 暂停期间不抓日志，这段不会补回来——暂停就是"先不看了"；页面上的"暂停跟随"是另一件事，只控制列表滚不滚
 

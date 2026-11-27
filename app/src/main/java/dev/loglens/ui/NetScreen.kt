@@ -206,9 +206,11 @@ fun NetScreen(
         } else {
             val parsed = NetSnapshot.parse(result.stdout)
             val now = System.currentTimeMillis()
-            tracks = mergeTracks(emptyMap(), parsed, now, 0L)
+            // 单次采样也要在已有轨迹上合并：录制停下来时会走到这里，如果从 emptyMap() 重算，
+            // 那些「刚消失」的连接（90 秒留痕）会被当场清空，等于停录制就丢历史
+            tracks = mergeTracks(tracks, parsed, now, KEEP_DEAD_MS)
             lastSampleAt = now
-            samples = 1
+            samples = samples + 1
             val pair = resolveUids(pm, parsed, uidPkgs, uidLabels)
             uidPkgs = pair.first
             uidLabels = pair.second
