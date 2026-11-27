@@ -237,16 +237,23 @@ def audit(meta, files):
         # 5. 代码能力
         if low.endswith((".kt", ".java", ".kts", ".xml")) or ext == "":
             for ln in lines:
+                net_labels, tel_labels, risky_labels = [], [], []
                 for pat, label in NETWORK_PATTERNS:
                     if re.search(pat, ln):
-                        add(SEV_BLOCK, "引入网络能力", f"{label}：`{path}` → `{ln.strip()[:110]}`")
+                        net_labels.append(label)
                 for pat, label in TELEMETRY_PATTERNS:
                     if re.search(pat, ln):
-                        add(SEV_BLOCK, "引入上报/统计", f"{label}：`{path}` → `{ln.strip()[:110]}`")
+                        tel_labels.append(label)
+                if net_labels:
+                    add(SEV_BLOCK, "引入网络能力", f"{' / '.join(sorted(set(net_labels)))}：`{path}` → `{ln.strip()[:110]}`")
+                if tel_labels:
+                    add(SEV_BLOCK, "引入上报/统计", f"{' / '.join(sorted(set(tel_labels)))}：`{path}` → `{ln.strip()[:110]}`")
                 if low.endswith((".kt", ".java")):
                     for pat, label in RISKY_PATTERNS:
                         if re.search(pat, ln):
-                            add(SEV_WARN, "需要看一眼的能力", f"{label}：`{path}` → `{ln.strip()[:110]}`")
+                            risky_labels.append(label)
+                    if risky_labels:
+                        add(SEV_WARN, "需要看一眼的能力", f"{' / '.join(sorted(set(risky_labels)))}：`{path}` → `{ln.strip()[:110]}`")
                 if re.search(r"[A-Za-z0-9+/]{200,}={0,2}", ln):
                     add(SEV_BLOCK, "超长 Base64 块", f"`{path}` —— 疑似塞了编码过的载荷")
                 if ln.count("\\u") >= 8:
