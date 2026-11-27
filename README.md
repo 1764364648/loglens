@@ -157,30 +157,7 @@ App 内还提供了一份逐条摊开的说明：**设置 → 关于 → 隐私�
 
 **装之前核对两件事**：Release 里随附的 `LogLens-x.y.z.apk.sha256` 要和文件对得上；签名证书指纹必须是 `1C:75:ED:15:BB:CB:B1:D4:44:CF:E6:7C:23:65:0C:6A:CA:B7:75:E8:13:8B:04:35:A6:DE:6C:18:BE:DF:C6:AC`（`apksigner verify --print-certs` 就能看）。指纹变了就是另一个包，和 1.2.4 没法互相覆盖升级。
 
-**依赖是逐个核对过的。** `gradle/verification-metadata.xml` 钉住 550 多个构件的 SHA-256，算上国内镜像在内任何一层返回被替换的构件，构建都会直接中断；依赖版本全部写死，不用 `+`、不用 SNAPSHOT，也不挂 JitPack 这种「从任意仓库现编」的源。
-
-**没有自动发布，也没有 CI 替你签名产包。** 安装包只在维护者本机用固定 keystore 编出来、手工上传；PR 附带的 APK 一律不予采用。CI 只做验证：一次性 runner 上跑 `assembleDebug`、60 条单测和 `lintDebug`（0 error），`pull_request` 触发、令牌只读、不注入 secret、不留产物；它和 `文档引用` 都已是必需检查。
-
-**合并前有一道机器闸门。** 每个 PR 都会跑 `pr-audit`：它只读 diff 文本、不执行 PR 里的代码、不 checkout PR，按 14 个分类查——仓库结构与供应链文件、文件名与路径、二进制与伪装文件、Manifest 权限与组件、构建脚本与依赖、网络、上报遥测、动态加载与命令执行、敏感数据能力、后台常驻、混淆与不可见字符、密钥泄露、PR 元信息，外加逐提交复查。逐提交复查就是防「先加后撤」：某个提交里偷偷加了东西、后面再撤销，净 diff 看着干净，也会被拦下来。规则逐条写在 [`security/audit-rules.md`](security/audit-rules.md)，背后对应的是真实发生过的投毒事件（SLSA 的 commit graph 攻击、Datadog 的 hackerbot-claw 文件名注入、Trojan Source 的双向控制符、依赖混淆与仿冒包名等），不是拍脑袋想的。规则自带 50 条自测（python tools/test_pr_audit.py），改规则必须同时补用例并跑通，否则等于给自己留了个假闸门。
-
-命中就直接红，而 `pr-audit` 是 `main` 的必需检查，红着的时候合并按钮点不动。所以就算审的时候看走眼，带毒 PR 也进不来。
-
-它还会在 PR 里留一条**会自己更新**的评论：结论、改动概览（改了哪些文件、什么类型）、逐条阻断项与待确认项，按分类归好；同时把 PR 打上 `pr-audit: blocked` 或 `pr-audit: passed` 标签。同一个 PR 再次推送时更新同一条评论，不会刷屏。
-
-**闸门之外还有一个人味一点的评审。** `pr-review` 用大模型读 PR 的标题、描述、提交和 diff，先判「这个 PR 合不合理」——想解决的问题仓库需不需要、范围有没有收敛、有没有夹带工作流/二进制/依赖换源这类东西；合理了才评「写得怎么样」：正确性、边界、可维护性、测试，给评分和逐条问题（严重度 + 位置 + 改法）。判断不合理时它**不会自动关闭**，只在评论里写清理由、`@` 我、打上 `pr-review: 建议关闭（待决定）`，关不关由我点。它没有任何放行权，也不合并、不批准；`main` 能不能合，还是看 `pr-audit` 绿不绿和人工那一票。分工和防提示词注入的做法写在 [`security/ai-review.md`](security/ai-review.md)。
-
-`docs/` 里写的「`文件:行号`」也不是摆设：`tools/check_docs.py` 会把 `docs/*.md` 里的引用逐个核对文件和行号，代码挪过了却忘了改文档，CI 直接红。
-
-想先在本地看一遍也行（不用等 CI）：
-
-```bash
-python tools/pr_audit.py --pr 12              # 查线上 PR
-python tools/pr_audit.py --range origin/main..HEAD   # 查自己还没推的分支
-```
-
-加依赖的流程是「先改 `security/dependency-allowlist.txt`，再重新生成校验清单」，两处都会出现在 diff 里，藏不住。
-
-`main` 分支受保护：要开 PR、要审查通过、禁止强推；`.github/CODEOWNERS` 把所有路径指向维护者，等于绕不过审查。漏洞请走私密报告，别开公开 Issue，细节见 [SECURITY.md](SECURITY.md)。
+**依赖和构建也做了校验。** 每个构件的 SHA-256 都钉在 `gradle/verification-metadata.xml` 里，任一镜像返回被替换的构件，构建直接中断；CI 只跑验证（编译、60 条单测、lint），不产包。PR 闸门、分支保护与漏洞报告细节见 [SECURITY.md](SECURITY.md)。
 
 ## 许可
 
