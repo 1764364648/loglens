@@ -1,6 +1,7 @@
 package dev.loglens.data
 
 import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 全局日志仓库：环形缓冲 + 增量待消费队列。
@@ -17,7 +18,14 @@ class LogRepository(private val defaultCapacity: Int = 5000) {
     private val buffer = ArrayDeque<LogEntry>()
     private val pending = ArrayList<LogEntry>()
 
-    private var seq = 0L
+    /**
+     * 行号发号器。
+     *
+     * 原来走 `synchronized(lock) { ++seq }`：每一行日志在解析阶段就要拿一次仓库的全局锁，
+     * 到 [add] 时再拿一次——两把锁串在热路径上，而 [add] 的锁里还在跑崩溃正则。
+     * 发号本身只需要自增语义，用 [AtomicLong] 就够，且没有与其它字段的复合不变式。
+     */
+    private val seq = AtomicLong(0)
 
     private var totalValue = 0L
     private var crashValue = 0
@@ -27,7 +35,7 @@ class LogRepository(private val defaultCapacity: Int = 5000) {
 
     data class Stats(val total: Long, val crashes: Int)
 
-    fun nextId(): Long = synchronized(lock) { ++seq }
+    fun nextId(): Long = seq.incrementAndGet()
 
     /**
      * 收一条日志。
@@ -35,14 +43,19 @@ class LogRepository(private val defaultCapacity: Int = 5000) {
      * 这里刻意不写任何 StateFlow：每行都 `_version.value = ...` + `_stats.value = ...`
      * 等于每条日志两次并发原语写、两次收集器唤醒，而 UI 侧本来就是 160ms 批量取，
      * 中间值全被合并掉——纯浪费。计数只累加，UI 在自己的 tick 里读 [statsSnapshot]。
+     *
+     * 崩溃聚合（[CrashStats.record]，内部要跑 EXCEPTION 正则 + ConcurrentHashMap.compute）
+     * 刻意放到锁**外**：缓冲区的锁是日志列队、UI 拉取的必经之路，正则不该占着它。
+     * 代价是聚合与入队不再严格同序，但聚合只关心「同一签名累计了几次」，与顺序无关。
      */
     fun add(entry: LogEntry) {
+        var crash = false
         synchronized(lock) {
             buffer.addLast(entry)
             totalValue++
             if (entry.isCrash) {
                 crashValue++
-                CrashStats.record(entry)
+                crash = true
             }
             while (buffer.size > capacity) buffer.removeFirst()
             pending.add(entry)
@@ -52,6 +65,7 @@ class LogRepository(private val defaultCapacity: Int = 5000) {
                 pending.subList(0, drop).clear()
             }
         }
+        if (crash) CrashStats.record(entry)
     }
 
     fun drainPending(): List<LogEntry> = synchronized(lock) {

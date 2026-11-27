@@ -203,5 +203,24 @@
 
 基线里的 17 条 `NewApi`（`MetricStyle`/`ProgressStyle`/语义常量）已通过 `@android.annotation.TargetApi(36/37)` 标注说明“只在 guarded 分支调用”而消警；其中真实存在的 API 36.1 守卫错误（`setRequestPromotedOngoing`）已经改代码修复，不是单纯消警。
 
+## 四、第三轮外部评审（2026-11-27）
 
+外部 AI 就仓库现状给了两组意见：代码质量 7 条，评审管线 6 条。逐条处理如下。
 
+### 已改
+
+1. **pid 刷新性能债**（`logcat/LogcatEngine.kt`）：原来固定 4 秒跑一次完整 `ps -A`，而 `ShellRunner` 每条命令尾部都挂 `sleep 0.6` 保活，稳定采集时等于一直在创建 shell 进程。改成 15 秒轮询：先走 `pidof -s 包名` 快路径（一行输出）；包还有进程就不跑 ps；包没进程了、或距上次完整 ps 超过 40 秒，才落回 `ShellRunner.pidsFor` 的 ARGS 解析（`包名:子进程` 不会漏）。pidof 不可用的 ROM 上 `pidsOf` 返回空，自动落回完整 ps，不卡在快路径。
+2. **restartCount 数据竞争**（`logcat/LogcatEngine.kt`）：看门狗线程读+自增、读取线程 `emit()` 写 0，普通 `Int` 的 `++` 不是原子操作，读到脏值会让「重启 3 次就放弃」判错。改成 `AtomicInteger`，自增用 `incrementAndGet()`，诊断文本用的也是自增后的值。
+3. **全局锁里跑正则**（`data/LogRepository.kt`）：`nextId()` 原来在仓库锁内自增，每行日志在解析与入队时各拿一次锁；`add()` 的锁里还跑 `CrashStats.record()` 的 EXCEPTION 正则与 `ConcurrentHashMap.compute`。改成 `AtomicLong` 无锁发号，崩溃聚合移到锁外——聚合只关心同一签名累计几次，与入队顺序无关。
+4. **文档数字漂移**（`README.md` / `security/audit-rules.md`）：README 的「70 条单测」实际 76；audit-rules 的「556 个构件」实际 559。两处已改正。
+5. **计数没人校对**（`tools/check_docs.py`）：原来只校验「文件:行号」，数字靠人眼。新增 `check_counts()`：README 的单测数对 `app/src/test` 下的 `@Test` 计数，audit-rules 的构件数对 `gradle/verification-metadata.xml` 的 `<component` 计数，对不上直接红。这一轮就是先让它报错、再改的数字。
+6. **AI 评审闭卷**（`tools/pr_review.py`）：原来只等 `pr-audit` 的结论，完全不读 `build` job，所以编译失败、单测挂一半的 PR 照样能拿到「结构性很好、建议合并」。新增 `ci_snapshot` / `ci_verdict` / `ci_fact`：同时读 `文档引用` 与 `编译 + 单测` 两个 check-run；构建失败就不出评审（只写「等 CI 绿了再评」）；构建还在跑则照常评审，但在提示词里写明「本轮结论不含编译结果」。自测 48 → 52 条，`.github/workflows/pr-review.yml` 与 `security/ai-review.md` 的数字同步。
+7. **结论模型漂移不披露**（`tools/pr_review.py` / `security/ai-review.md`）：模型队列换人等于换能力档位，同一份 diff 可能从「合理」变成「存疑」；标签一旦由「当时轮到谁」决定就成了噪音。现在结论仍由首选模型给出，一旦降级到队列后面，评论脚注显式标「⚠ 判据与上几轮不可比」。
+8. **信任模型与放行边界写进规则**（`SECURITY.md` / `security/ai-review.md`）：明确「默认免费网关会收到 PR 标题、描述、提交信息与 diff 全文，这和 App 里『日志不出本机』是两套信任模型」；并把「AI 评审不构成 approve，合并前必须 CI 全绿 + 真机冒烟」从默契变成仓库规则。
+
+### 没做，原因
+
+- **给 `CaptureController` 补状态机测试（假引擎注入）**：`CaptureController` 是 `object`，启动序列直接吃 `Context`、`ShizukuHelper`、`FileLogWriter`，纯 JVM 单测跑不起来。真要测「启动中 stop → Idle / writer 关闭 / 无二次 spawn」，得先把引擎与写入器接口化、给控制器开注入点，或者引入 Robolectric（新依赖必须过 `verification-metadata` 校验）。这是结构性改动，不是补两条断言，单独立项。
+- **拆 `LogScreen.kt` 文件**：composable 已经拆成容器 + 六个区域，文件仍约 2400 行。维护者明确不拆——拆文件会产生大量纯移动 diff，收益只是让下一个人少读上下文。不再重复提。
+
+> 本轮守门结果：`assembleDebug` + `testDebugUnitTest` + `lintDebug` 全绿（0 error / 88 warning / 12 hint），单测 76 条，`python tools/check_docs.py` = 89 处引用 + 2 处计数全部有效，`python tools/pr_review.py --selftest` = 52 条全过。

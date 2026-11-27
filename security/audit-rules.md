@@ -23,7 +23,7 @@
 | Trojan Source：用 Unicode 双向控制符让"审阅者看到的顺序"和"编译器读到的顺序"不一致（CVE-2021-42574） | trojansource.codes / NVD | 行内 bidi 控制字符即阻断 |
 | 同形字符：西里尔/希腊字母冒充拉丁字母，两个标识符看起来一样（CVE-2021-42694） | 同上论文 | 非中文行里出现西里尔/希腊字符即阻断 |
 | 依赖混淆 / 仿冒包名（把内部包名发布到公共仓库，或只差一个字符） | Alex Birsan 2021 披露（Microsoft/Apple/PayPal 等 35 家） | 依赖白名单 + 编辑距离 ≤2 判仿冒 + 非注册源依赖阻断 |
-| 依赖哈希缺失，构建时拉到被替换的构件 | SLSA / 供应链实践 | `gradle/verification-metadata.xml`（556 个构件 SHA-256），改它即阻断 |
+| 依赖哈希缺失，构建时拉到被替换的构件 | SLSA / 供应链实践 | `gradle/verification-metadata.xml`（559 个构件 SHA-256），改它即阻断 |
 | 安装器路径穿越（版本号里的 `../` 被当路径拼接，最终以 root 执行） | Homebrew cask 类漏洞复盘 | 文件名/路径穿越检查 |
 | 二进制载荷混进仓库（jar/dex/so/压缩包），diff 里看不见内容 | 多起 npm/PyPI 投毒事件的共同特征 | 二进制后缀一律阻断，资源目录新增降级为待确认 |
 | 借新权限/导出组件/无障碍服务把 App 变成采集器 | Android 恶意软件常见组合 | Manifest 专项检查 |

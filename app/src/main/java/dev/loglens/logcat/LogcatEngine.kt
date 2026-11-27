@@ -11,6 +11,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -48,6 +49,14 @@ class LogcatEngine(private val listener: Listener) {
     private val running = AtomicBoolean(false)
     private val scanned = AtomicLong(0)
     private val matched = AtomicLong(0)
+
+    private companion object {
+        /** pid 集合轮询间隔：从 4s 放宽到 15s，配合 pidof 快路径把常驻 shell 调用压下来 */
+        const val PID_POLL_MS = 15_000L
+
+        /** 完整 ps 兜底间隔：快路径只能说明「主进程还在」，子进程增减交给这条兜底 */
+        const val PID_FULL_SCAN_MS = 40_000L
+    }
 
     private var process: Process? = null
     private var outThread: Thread? = null
@@ -87,8 +96,14 @@ class LogcatEngine(private val listener: Listener) {
     @Volatile
     private var lastIdleWarnAt: Long = 0L
 
-    @Volatile
-    private var restartCount: Int = 0
+    /**
+     * 读取线程重启计数。
+     *
+     * 它是三个线程共用的：看门狗线程读+自增（判断「3 次就放弃」），读取线程 `emit()` 写 0。
+     * 原来是普通 `Int`，`++` 不是原子操作——读到脏值时行为是「该重启的不重启」或
+     * 「该放弃的不放弃」，正好落在这条自愈链最要紧的判断上。改成 [AtomicInteger]。
+     */
+    private val restartCount = AtomicInteger(0)
 
     @Volatile
     private var pidLockedLogged: Boolean = false
@@ -133,7 +148,7 @@ class LogcatEngine(private val listener: Listener) {
         this.buffers = buffers.ifEmpty { LogBuffer.DEFAULT }
         this.includeEvents = includeEvents && LogBuffer.hasEvents(this.buffers)
         this.globalMode = globalMode
-        this.restartCount = 0
+        this.restartCount.set(0)
         this.pidLockedLogged = false
         this.apBlocked = false
         this.lastProbeAt = 0L
@@ -218,16 +233,34 @@ class LogcatEngine(private val listener: Listener) {
         }
 
         // ⑥ 进程集合刷新（应用重启 / 多进程）
+        //
+        // 以前这里每 4 秒跑一次完整 `ps -A`。Shizuku 的每条命令尾部都挂着 `sleep 0.6` 保活
+        // （见 ShellRunner 的口径），稳定采集时等于一直在创建 shell 进程——评价里算的那笔账
+        // （「15%-25% 的时间在创建 shell 进程」）就是这条路径。放兜里挂两小时，烧的是电和 binder。
+        //
+        // 现在分两层：
+        // 1. 每 [PID_POLL_MS] 先问一次 `pidof -s 包名`：一行输出、一个 pid，解析成本远低于 ps 全表；
+        // 2. 只要包还有进程在跑，就认为集合大概率没变，这轮不跑 ps；
+        // 3. 包没进程了（被杀 / 正在重启）、或距上一次完整 ps 超过 [PID_FULL_SCAN_MS]，才落回
+        //    [ShellRunner.pidsFor] 的完整解析——它读 ARGS 列，能区分 `包名:子进程`，不会漏子进程。
+        // pidof 在个别 ROM 上可能不存在，此时 `pidsOf` 返回空，直接落回完整 ps，不会卡在快路径。
         pidThread = Thread({
+            var lastFullScanAt = System.currentTimeMillis()
             while (running.get() && generation == gen) {
                 try {
-                    Thread.sleep(4_000)
+                    Thread.sleep(PID_POLL_MS)
                 } catch (t: InterruptedException) {
                     break
                 }
                 if (!running.get() || generation != gen) break
+                val quick = runCatching { ShellRunner.pidsOf(packageName) }.getOrDefault(emptyList())
+                val now = System.currentTimeMillis()
+                val needFull = quick.isEmpty() || pidSet.isEmpty() ||
+                    now - lastFullScanAt >= PID_FULL_SCAN_MS
+                if (!needFull) continue
                 val fresh = runCatching { ShellRunner.pidsFor(packageName, targetUid).toSet() }
                     .getOrDefault(emptySet())
+                lastFullScanAt = now
                 if (fresh != pidSet) {
                     pidSet = fresh
                     if (fresh.isNotEmpty()) {
@@ -254,9 +287,9 @@ class LogcatEngine(private val listener: Listener) {
 
                 val reader = outThread
                 if (reader == null || !reader.isAlive) {
-                    if (restartCount < 3) {
-                        restartCount++
-                        diag("读取线程已退出（重启 $restartCount/3）${stderrNote()}")
+                    if (restartCount.get() < 3) {
+                        val n = restartCount.incrementAndGet()
+                        diag("读取线程已退出（重启 $n/3）${stderrNote()}")
                         if (!spawn(gen)) return@Thread
                     } else {
                         diag("读取线程反复退出，停止重试${stderrNote()}")
@@ -523,7 +556,7 @@ class LogcatEngine(private val listener: Listener) {
 
     private fun emit(entry: LogEntry) {
         matched.incrementAndGet()
-        restartCount = 0
+        restartCount.set(0)
         listener.onEntry(entry)
     }
 

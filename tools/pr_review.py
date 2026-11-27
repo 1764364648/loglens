@@ -210,6 +210,59 @@ def wait_audit(repo, sha, tok, seconds):
     return audit_verdict(repo, sha, tok)
 
 
+# 构建检查的 check-run 名称（见 .github/workflows/build.yml 的 job `name:`）
+CI_DOCS_CHECK = "文档引用"
+CI_BUILD_CHECK = "编译 + 单测"
+
+
+def ci_snapshot(repo, sha, tok):
+    """同一次 push 上所有 check-run 的状态：{名称: (status, conclusion)}。
+
+    以前这里只取 pr-audit 的结论，`build` job（编译 + 单测 + lint）根本不读——于是
+    编译失败、单测挂一半的 PR，照样能拿到「结构性很好、建议合并」的评语。它看的是 diff
+    文本，不是运行结果；而「这段代码到底跑不跑得起来」恰恰是评审最该知道的事实。
+    """
+    try:
+        data = api(f"https://api.github.com/repos/{repo}/commits/{sha}/check-runs?per_page=100", tok)
+    except Exception:
+        return {}
+    return {r.get("name"): (r.get("status"), r.get("conclusion"))
+            for r in data.get("check_runs", [])}
+
+
+def ci_verdict(snap):
+    """'bad' / 'ok' / 'pending' / 'unknown'。
+
+    只认两个构建检查：文档引用、编译 + 单测（后者含 assemble + 单测 + lint）。
+    未完成的算 pending，不冒充通过。
+    """
+    states = [snap.get(CI_DOCS_CHECK), snap.get(CI_BUILD_CHECK)]
+    if all(s is None for s in states):
+        return "unknown"
+    if any(s and s[0] != "completed" for s in states):
+        return "pending"
+    if any(s and s[1] not in ("success", "neutral", "skipped") for s in states):
+        return "bad"
+    return "ok"
+
+
+def ci_fact(snap):
+    """把 CI 结果写成一句事实，塞进 prompt 的 note：模型据此知道「代码能不能编译」。"""
+    d, b = snap.get(CI_DOCS_CHECK), snap.get(CI_BUILD_CHECK)
+    if not d and not b:
+        return "本次 CI 结论未取到（可能还没开始跑）。"
+    if b and b[0] != "completed":
+        return "本次 CI：编译 + 单测 + lint 仍在跑，本轮结论不含「代码是否编译通过」。"
+    if b and b[1] in ("success", "neutral"):
+        if d and d[0] == "completed" and d[1] not in ("success", "neutral", "skipped"):
+            return "本次 CI：编译 + 单测 + lint 通过，但文档引用检查失败。"
+        return "本次 CI：编译 + 单测 + lint 已通过。"
+    if b:
+        return "本次 CI：编译 + 单测 + lint 失败。"
+    return "本次 CI：没取到编译结论，只有文档引用检查。"
+
+
+
 # ---------------------------------------------------------------- 取材
 def should_skip(name, patch):
     low = name.lower()
@@ -553,7 +606,17 @@ def run(args):
             if args.summary_file:
                 open(args.summary_file, "w", encoding="utf-8").write("<!-- pr-review -->\n" + msg + "\n")
             return 0
-        note = "规则闸门 pr-audit 已通过。" if v == "ok" else "规则闸门结论未取到（可能还在跑）。"
+        snap = ci_snapshot(args.repo, meta["head"]["sha"], gh)
+        build_state = ci_verdict(snap)
+        if build_state == "bad":
+            msg = ("规则闸门过了，但构建检查没过（编译 / 单测 / lint / 文档引用有失败）。"
+                   "先看 Actions 的日志，绿了再来评——只读 diff 的评审对「跑不跑得起来」没有判断力。")
+            print(msg)
+            if args.summary_file:
+                open(args.summary_file, "w", encoding="utf-8").write("<!-- pr-review -->\n" + msg + "\n")
+            return 0
+        gate = "规则闸门 pr-audit 已通过" if v == "ok" else "规则闸门结论未取到（可能还在跑）"
+        note = f"{gate}；{ci_fact(snap)}"
 
     eco = False
     user, kept, skipped = build_user_prompt(meta, files, commits, note, eco=eco)
@@ -587,6 +650,11 @@ def run(args):
             note += "，前序候选额度耗尽后整包重判"
         if waited:
             note += "，等过一次瞬时限流"
+        # 标签由「当时轮到谁」决定，它就不是信息、是噪音：换模型等于换能力档位，
+        # 同一份 diff，A 模型判「合理」，额度耗尽后 B 模型可能判「存疑」。降级时必须自己说出来，
+        # 否则这个标签会被当成「这一轮比上一轮更差/更好」的证据。
+        if used != chain[0]:
+            note += f"；⚠ 结论由第 {len(tried) + 1} 个模型给出，首选 {chain[0]} 本轮不可用，判据与上几轮不可比"
         label += note + "）"
     body = render(meta, rev, kept, skipped, label)
     print(body)
@@ -700,6 +768,13 @@ def selftest():
     one, _, _ = collect_diff([{"filename": "big.kt", "patch": "+" + "x" * 30000}], max_file=20000)
     check("单个文件被截断", "已截断" in one)
 
+    check("CI 失败判为 bad", ci_verdict({CI_BUILD_CHECK: ("completed", "failure")}) == "bad")
+    check("CI 未完成判为 pending", ci_verdict({CI_BUILD_CHECK: ("in_progress", None)}) == "pending")
+    check("CI 全绿判为 ok",
+          ci_verdict({CI_BUILD_CHECK: ("completed", "success"),
+                      CI_DOCS_CHECK: ("completed", "success")}) == "ok")
+    check("CI 事实写明编译结果", "编译" in ci_fact({CI_BUILD_CHECK: ("completed", "success")}))
+
     meta = {"_repo": "u/r", "number": 1, "user": {"login": "a"}, "_author_age": 5,
             "title": "t", "body": "", "commits": 1, "changed_files": 1,
             "additions": 1, "deletions": 0}
@@ -729,7 +804,8 @@ def main():
     p.add_argument("--repo")
     p.add_argument("--comment", action="store_true")
     p.add_argument("--summary-file")
-    p.add_argument("--wait-audit", type=int, default=0, help="等 pr-audit 结论的秒数，0 为不等")
+    p.add_argument("--wait-audit", type=int, default=0,
+                   help="等 pr-audit 结论的秒数，0 为不等；同时会读构建检查（编译 + 单测），没过就不出评审")
     p.add_argument("--ensure-labels", action="store_true")
     p.add_argument("--stub", help="用本地 JSON 代替模型调用（调试渲染用）")
     p.add_argument("--selftest", action="store_true")

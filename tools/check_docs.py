@@ -58,6 +58,57 @@ def is_binary(rel: str) -> bool:
     return rel.endswith((".png", ".jpg", ".jar", ".apk"))
 
 
+# ---------------------------------------------------------------- 数字校验
+# 行号能被机器抓，数字以前只能靠人眼：README 写「70 条单测」时实际已经 76，
+# audit-rules 写「556 个构件」时实际 559。这类漂移不影响功能，但会让人对
+# 「这份文档是核对过的」这件事失去信任。
+COUNT_RULES = (
+    ("README.md", re.compile(r"(\d+)\s*条单测"), "tests", "条单测"),
+    ("security/audit-rules.md", re.compile(r"(\d+)\s*个构件"), "components", "个构件"),
+)
+
+
+def count_tests() -> int:
+    files = list((ROOT / "app" / "src" / "test").rglob("*.kt"))
+    return sum(
+        1
+        for f in files
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip().startswith("@Test")
+    )
+
+
+def count_components() -> int:
+    xml = (ROOT / "gradle" / "verification-metadata.xml").read_text(encoding="utf-8", errors="replace")
+    return len(re.findall(r"<component\s", xml))
+
+
+COUNT_FUNCS = {"tests": count_tests, "components": count_components}
+
+
+def check_counts():
+    """文档里写死的计数必须和仓库实际一致；对不上就报错，由 CI 直接红。"""
+    bad, checked = [], 0
+    actual = {}
+    for rel, pattern, key, unit in COUNT_RULES:
+        p = ROOT / rel
+        if not p.exists():
+            continue
+        if key not in actual:
+            actual[key] = COUNT_FUNCS[key]()
+        text = p.read_text(encoding="utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            m = pattern.search(line)
+            if not m:
+                continue
+            checked += 1
+            if int(m.group(1)) != actual[key]:
+                bad.append(
+                    f"{rel}:{lineno} 写的 {m.group(1)} {unit} 与实际不符（实际 {actual[key]}）"
+                )
+    return bad, checked
+
+
 def check_file(md: pathlib.Path, text: str):
     bad, checked = [], 0
     for lineno, line in enumerate(text.splitlines(), 1):
@@ -107,14 +158,18 @@ def main():
         bad += b
         checked += c
 
+    # 数字校验独立于 docs 目录：README 与 audit-rules 都在文档目录外
+    count_bad, count_checked = check_counts()
+    bad += count_bad
+
     if bad:
-        print(f"发现 {len(bad)} 处坏引用（共核对 {checked} 处）：")
+        print(f"发现 {len(bad)} 处坏引用/数字漂移（共核对 {checked} 处引用、{count_checked} 处计数）：")
         for x in bad[:60]:
             print("  " + x)
         if len(bad) > 60:
             print(f"  ……另有 {len(bad) - 60} 处")
         return 1
-    print(f"文档引用全部有效（核对 {checked} 处）")
+    print(f"文档引用全部有效（核对 {checked} 处引用、{count_checked} 处计数）")
     return 0
 
 
