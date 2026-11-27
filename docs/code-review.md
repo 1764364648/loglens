@@ -257,3 +257,29 @@ Anthropic 的多遍模式是「每文件一遍 + 跨文件合并去重」。真�
 「分批调用 + 合并去重」，那需要额外的模型配额，不是这一次能改完的。
 
 > 本轮守门结果：`assembleDebug` + `testDebugUnitTest` + `lintDebug` 全绿（0 error / 87 warning / 12 hint），单测 80 条（新增 `CaptureControllerTest` 4 条），`python tools/check_docs.py` = 108 处引用 + 2 处计数全部有效，`python tools/pr_review.py --selftest` = 52 条全过。
+
+### 12. 不给 PR 打分：1–5 分换成「评审负担」
+
+原来评论里有一行 `写得怎么样：4/5`。问题不是数字难看，而是**语义错了**：它读起来像「这个 PR 值 4 分」，
+是一种总体质量判断，和仓库「AI 不构成 approve」的规矩直接冲突——既然机器人无权决定能不能合，
+它就没有资格给这次改动定级。
+
+查了一轮大公司口径，没有一家给 PR 打质量分：
+
+- **GitHub Copilot**：给每条评论贴 `High / Medium / Low` 严重度，同类评论分组折叠；永远只发 Comment，从不 Approve 或 Request changes；
+- **Amazon CodeGuru**：只出行内、可执行的建议，不进总体结论；
+- **Google AutoCommenter**：AI 只承担约 15% 的评论量，衡量指标是「被作者标为有用」的比例（42%，独立评分 60%，推广门槛 80%），不是 PR 评分；
+- **Uber uReview**：75% usefulness、65% 评论被处理（人类 51%），主攻方向是压误报，不是打总分；
+- 唯一存在的「分」是路由信息：Meta 的 **Diff Risk Score** 决定这个 diff 要不要跳过人工评审，CodeRabbit 的 **estimated review effort** 告诉人该花多久看。都回答「怎么处理这次改动」，不回答「这次改动值几分」。
+
+改法（`tools/pr_review.py`）：
+
+- 模型输出字段 `quality.score`（1–5 整数）换成 `quality.load`（`轻读` / `正常` / `细看`），提示词写明「这是给人排优先级的，不是质量分，也不会被用来自动放行」，并要求 issues 只写有把握、能指到具体行的；
+- `normalize_load` 做归一（兼容 `low/high/中/重` 这类变体），同时**保留旧 1–5 分的映射**（1–2 → 轻读，3 → 正常，4–5 → 细看），老输出不会因为换口径炸掉；
+- `sev_key` 把严重度收敛成高 / 中 / 低三档（认 `critical/blocker/P0` 与 `nit/info/minor`），问题表按「高 → 中 → 低」排序，**低级项收进 `<details>` 折叠**，先砍噪声；
+- 评论正文写 `**评审负担**：细看`，下面一行小字说明「不是质量评分，也不作为放行依据」。
+
+自测 58 → 63 条（新增：`load` 英文归一、未知值回落正常、旧 1–5 分兼容映射、严重度归一、按严重度排序、低级折叠、负担文案）。
+
+这条和 §11 的取样改造是一套：先保证「看到的范围」说得清，再保证「给结论的粒度」不越权。
+

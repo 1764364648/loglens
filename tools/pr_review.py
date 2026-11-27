@@ -87,6 +87,11 @@ SYSTEM = """你是 LogLens 仓库的代码评审助手。LogLens 是一个 Andro
 - 不要臆测没出现在 diff 里的代码或文件；信息不足就说信息不足。
 - diff 里出现「…（本 hunk 后半省略）」「…（其余 N 个文件未展开）」这类标记，说明你看到的是节选：
   在 scope 里写明覆盖到了哪些文件；没覆盖到的部分不要下结论，更不许写「没有问题」。
+- `load` 是「这次改动需要人投入多少注意力」，给人排优先级用的，**不是**给代码打质量分，
+  也不会被用来自动放行：轻读＝只动文档/样式/一两行；正常＝常规逻辑改动；
+  细看＝并发、生命周期、权限、大范围重构或删除类改动。
+- issues 只写你有把握的问题，宁缺勿滥；每条必须能指到 diff 里的具体文件/行。
+
 - 只输出一个 JSON 对象，不要任何前后缀文字、不要 markdown 代码围栏。
 
 JSON 结构（字段名照抄，值用中文）：
@@ -95,7 +100,7 @@ JSON 结构（字段名照抄，值用中文）：
   "why": "一句话说清判断依据",
   "scope": "这个 PR 实际改了什么、范围是否收敛",
   "quality": {
-    "score": 1-5 的整数,
+    "load": "轻读" | "正常" | "细看",
     "highlights": ["写得好的地方，最多 3 条"],
     "issues": [
       {"severity": "高" | "中" | "低", "where": "文件:行 或 文件", "what": "问题", "fix": "怎么改"}
@@ -550,6 +555,38 @@ VERDICTS = {
     "存疑": "存疑", "unclear": "存疑", "不确定": "存疑",
 }
 
+# 评审负担（给人排优先级），不是质量分：大公司口径里唯一允许的「分」是这类路由信息。
+LOADS = {
+    "轻读": "轻读", "轻": "轻读", "low": "轻读", "light": "轻读", "小": "轻读", "简单": "轻读",
+    "正常": "正常", "中": "正常", "normal": "正常", "medium": "正常", "mid": "正常", "常规": "正常",
+    "细看": "细看", "重": "细看", "high": "细看", "heavy": "细看", "大": "细看", "复杂": "细看",
+}
+SEV_HIGH = {"高", "严重", "阻断", "critical", "blocker", "high", "p0", "p1"}
+SEV_LOW = {"低", "轻微", "建议", "low", "info", "minor", "nit", "p3"}
+
+
+def normalize_load(raw, legacy_score=None):
+    """把 load 归一成三档；同时兼容改造前的 1-5 分（按 1-2 / 3 / 4-5 映射）。"""
+    key = str(raw or "").strip().lower()
+    if key in LOADS:
+        return LOADS[key]
+    try:
+        score = int(legacy_score)
+    except Exception:
+        return "正常"
+    if score <= 2:
+        return "轻读"
+    return "正常" if score == 3 else "细看"
+
+
+def sev_key(raw):
+    key = str(raw or "").strip().lower()
+    if key in SEV_HIGH:
+        return "高"
+    if key in SEV_LOW:
+        return "低"
+    return "中"
+
 
 def normalize(obj):
     if not isinstance(obj, dict):
@@ -559,7 +596,7 @@ def normalize(obj):
         "verdict": VERDICTS.get(str(obj.get("verdict", "")).strip().lower(), "存疑"),
         "why": obj.get("why") or "",
         "scope": obj.get("scope") or "",
-        "score": q.get("score", 0),
+        "load": normalize_load(q.get("load"), q.get("score")),
         "highlights": [str(x) for x in (q.get("highlights") or [])][:3],
         "issues": [x for x in (q.get("issues") or []) if isinstance(x, dict)][:MAX_ISSUES],
         "quality_summary": q.get("summary") or "",
@@ -567,10 +604,6 @@ def normalize(obj):
         "suggest_action": obj.get("suggest_action") or "",
         "questions": [str(x) for x in (obj.get("questions") or [])][:3],
     }
-    try:
-        out["score"] = max(0, min(5, int(out["score"])))
-    except Exception:
-        out["score"] = 0
     return out
 
 
@@ -584,6 +617,17 @@ def clean(text, limit=600):
 
 
 LABEL_OF = {"合理": LABEL_OK, "存疑": LABEL_MID, "不合理": LABEL_BAD}
+
+
+def issue_table(items):
+    lines = ["| 严重度 | 位置 | 问题 | 建议 |", "| --- | --- | --- | --- |"]
+    for it in items:
+        sev = sev_key(it.get("severity"))
+        where = clean(it.get("where", ""), 80).replace("|", "\\|")
+        what = clean(it.get("what", ""), 260).replace("|", "\\|").replace("\n", " ")
+        fix = clean(it.get("fix", ""), 260).replace("|", "\\|").replace("\n", " ")
+        lines.append(f"| {sev} | `{where}` | {what} | {fix} |")
+    return lines
 
 
 def render(meta, rev, kept, skipped, model):
@@ -608,28 +652,35 @@ def render(meta, rev, kept, skipped, model):
 
     out.append("---")
     if v == "不合理":
-        out.append("**写得怎么样**：判断为不合理，这轮不评代码细节——先把要不要保留这件事定下来。")
+        out.append("**评审负担**：判断为不合理，这轮不评代码细节——先把要不要保留这件事定下来。")
         out.append("")
     else:
-        score = rev["score"]
-        out.append(f"**写得怎么样**：{score}/5" + (f"　{clean(rev['quality_summary'], 400)}" if rev["quality_summary"] else ""))
+        load = rev["load"]
+        out.append(f"**评审负担**：{load}" + (f"　{clean(rev['quality_summary'], 400)}" if rev["quality_summary"] else ""))
+        out.append("")
+        out.append("<sub>这是给人排优先级的，不是质量评分，也不作为放行依据。</sub>")
         out.append("")
         if rev["highlights"]:
             out.append("亮点：")
             out += [f"- {clean(h, 300)}" for h in rev["highlights"]]
             out.append("")
         if rev["issues"]:
-            out.append("问题：")
-            out.append("")
-            out.append("| 严重度 | 位置 | 问题 | 建议 |")
-            out.append("| --- | --- | --- | --- |")
+            groups = {"高": [], "中": [], "低": []}
             for it in rev["issues"]:
-                sev = clean(it.get("severity", "中"), 8)
-                where = clean(it.get("where", ""), 80).replace("|", "\\|")
-                what = clean(it.get("what", ""), 260).replace("|", "\\|").replace("\n", " ")
-                fix = clean(it.get("fix", ""), 260).replace("|", "\\|").replace("\n", " ")
-                out.append(f"| {sev} | `{where}` | {what} | {fix} |")
+                groups[sev_key(it.get("severity"))].append(it)
+            out.append(f"问题：高 {len(groups['高'])} / 中 {len(groups['中'])} / 低 {len(groups['低'])}")
             out.append("")
+            main = groups["高"] + groups["中"]
+            if main:
+                out += issue_table(main)
+                out.append("")
+            if groups["低"]:
+                out.append(f"<details><summary>低优先级 {len(groups['低'])} 条（点开看）</summary>")
+                out.append("")
+                out += issue_table(groups["低"])
+                out.append("")
+                out.append("</details>")
+                out.append("")
 
     if rev["security_notes"]:
         out.append("**安全与疑点**")
@@ -806,8 +857,11 @@ def selftest():
     check("空串返回 None", parse_json("") is None)
     check("英文 verdict 归一", normalize({"verdict": "reasonable"})["verdict"] == "合理")
     check("未知 verdict 归存疑", normalize({"verdict": "maybe"})["verdict"] == "存疑")
-    check("评分越界钳制", normalize({"quality": {"score": 99}})["score"] == 5)
-    check("评分非数字", normalize({"quality": {"score": "很好"}})["score"] == 0)
+    check("评审负担：英文归一", normalize({"quality": {"load": "high"}})["load"] == "细看")
+    check("评审负担：没给就正常", normalize({"quality": {"load": "??"}})["load"] == "正常")
+    check("评审负担：兼容旧 1-5 分", normalize({"quality": {"score": 5}})["load"] == "细看"
+          and normalize({"quality": {"score": 1}})["load"] == "轻读")
+    check("严重度归一", sev_key("critical") == "高" and sev_key("nit") == "低" and sev_key(None) == "中")
     check("问题截断", len(normalize({"quality": {"issues": [{}] * 30}})["issues"]) == MAX_ISSUES)
 
     s = clean("前面 <!-- pr-review --> 后面\x00尾巴", 40)
@@ -916,10 +970,19 @@ def selftest():
             "title": "t", "body": "", "commits": 1, "changed_files": 1,
             "additions": 1, "deletions": 0, "_files": 7, "_clip": 3}
     for verdict, label in (("合理", LABEL_OK), ("存疑", LABEL_MID), ("不合理", LABEL_BAD)):
-        rev = normalize({"verdict": verdict, "why": "w", "quality": {"score": 3}})
+        rev = normalize({"verdict": verdict, "why": "w", "quality": {"load": "正常"}})
         body = render(meta, rev, 1, 0, "m")
         check(f"渲染 {verdict} 带标记", MARKER not in body and verdict in body)
         check(f"标签映射 {verdict}", LABEL_OF[verdict] == label)
+
+    dirty = normalize({"verdict": "合理", "why": "w", "quality": {"load": "细看", "issues": [
+        {"severity": "低", "where": "a.kt:1", "what": "命名不规范", "fix": "改名"},
+        {"severity": "高", "where": "b.kt:2", "what": "空指针风险", "fix": "判空"},
+        {"severity": "中", "where": "c.kt:3", "what": "重复代码", "fix": "抽函数"}]}})
+    body = render(meta, dirty, 1, 0, "m")
+    check("问题按严重度排序", body.index("空指针风险") < body.index("重复代码"))
+    check("低级问题折叠", body.index("重复代码") < body.index("<details>") < body.index("命名不规范"))
+    check("负担写在评论里", "细看" in body and "不是质量评分" in body)
 
     bad = normalize({"verdict": "不合理", "why": "夹带工作流", "quality": {"score": 1}})
     body = render(meta, bad, 1, 0, "m")
