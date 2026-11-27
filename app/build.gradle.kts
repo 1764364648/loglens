@@ -91,6 +91,9 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // 纯 JVM 单测：解析、查询语法、过滤、ps 表解析这些不需要真机的逻辑
+    testImplementation("junit:junit:4.13.2")
 }
 
 // Kotlin 2.4 起 kotlinOptions DSL 已移除，统一使用 compilerOptions

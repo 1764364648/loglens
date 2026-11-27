@@ -98,11 +98,11 @@ class CompiledFilter(filter: LogFilter) {
         accept(entry, bookmarked, env())
 
     /** 一次取好查询环境，批量判断时复用，避免每条日志都读时钟/进程表 */
-    fun env(): QuerySyntax.Env = QueryEnvHolder.env(program)
+    fun env(): QuerySyntax.Env = QueryEnvHolder.env(program).withCase(caseSensitive)
 
     fun accept(entry: LogEntry, bookmarked: Boolean, env: QuerySyntax.Env): Boolean {
         if (entry.level.priority < minPriority) return false
-        return acceptIgnoringLevel(entry, bookmarked, env)
+        return acceptIgnoringLevel(entry, bookmarked, env.withCase(caseSensitive))
     }
 
     /**
@@ -206,3 +206,4 @@ internal object QueryEnvHolder {
 
     val EMPTY = QuerySyntax.Env()
 }
+

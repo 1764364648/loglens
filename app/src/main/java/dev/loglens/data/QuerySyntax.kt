@@ -18,8 +18,17 @@ object QuerySyntax {
     /** 求值环境。进程名表可能为空（未授权/ps 失败），此时 package:/process: 退化成匹配不到。 */
     class Env(
         val procNames: Map<Int, String> = emptyMap(),
-        val nowMs: Long = System.currentTimeMillis()
-    )
+        val nowMs: Long = System.currentTimeMillis(),
+        /**
+         * 是否区分大小写。默认 false（和 Android Studio 的查询一致）；
+         * 界面上的「区分大小写」开关会把它传进来，字面量匹配才真的区分大小写。
+         */
+        val caseSensitive: Boolean = false
+    ) {
+        /** 换成另一套大小写策略，进程表/时钟不变 */
+        fun withCase(sensitive: Boolean): Env =
+            if (sensitive == caseSensitive) this else Env(procNames, nowMs, sensitive)
+    }
 
     fun interface Node {
         fun eval(entry: LogEntry, env: Env): Boolean
@@ -182,10 +191,11 @@ object QuerySyntax {
             if (idx <= 0) {
                 // 裸词：全文（消息 / tag / 时间）子串匹配
                 highlights.add(word)
-                return Node { e, _ ->
-                    e.message.contains(word, true) ||
-                        e.tag.contains(word, true) ||
-                        e.time.contains(word, true)
+                return Node { e, env ->
+                    val ic = !env.caseSensitive
+                    e.message.contains(word, ic) ||
+                        e.tag.contains(word, ic) ||
+                        e.time.contains(word, ic)
                 }
             }
             var key = word.substring(0, idx).lowercase()
@@ -205,12 +215,12 @@ object QuerySyntax {
                 "tag" -> {
                     if (mode == Mode.CONTAINS) highlights.add(value)
                     val re = if (mode == Mode.REGEX) compileOrThrow(value) else null
-                    return Node { e, _ -> matchField(e.tag, value, mode, re) }
+                    return Node { e, env -> matchField(e.tag, value, mode, re, env.caseSensitive) }
                 }
                 "message", "msg" -> {
                     if (mode == Mode.CONTAINS) highlights.add(value)
                     val re = if (mode == Mode.REGEX) compileOrThrow(value) else null
-                    return Node { e, _ -> matchField(e.message, value, mode, re) }
+                    return Node { e, env -> matchField(e.message, value, mode, re, env.caseSensitive) }
                 }
                 "line" -> {
                     val re = compileOrThrow(value)
@@ -222,14 +232,14 @@ object QuerySyntax {
                     val re = if (mode == Mode.REGEX) compileOrThrow(value) else null
                     return Node { e, env ->
                         val name = env.procNames[e.pid] ?: return@Node false
-                        matchField(name, value, mode, re)
+                        matchField(name, value, mode, re, env.caseSensitive)
                     }
                 }
                 "process", "proc" -> {
                     val re = if (mode == Mode.REGEX) compileOrThrow(value) else null
                     return Node { e, env ->
                         val name = env.procNames[e.pid] ?: return@Node false
-                        matchField(name, value, mode, re)
+                        matchField(name, value, mode, re, env.caseSensitive)
                     }
                 }
                 "pid" -> {
@@ -275,8 +285,9 @@ object QuerySyntax {
                 else -> {
                     // 不认识的 key 当普通文本查，避免用户写习惯性前缀就整页空白
                     highlights.add(word)
-                    return Node { e, _ ->
-                        e.message.contains(word, true) || e.tag.contains(word, true)
+                    return Node { e, env ->
+                        e.message.contains(word, !env.caseSensitive) ||
+                            e.tag.contains(word, !env.caseSensitive)
                     }
                 }
             }
@@ -289,10 +300,10 @@ object QuerySyntax {
 
     private enum class Mode { CONTAINS, EQUALS, REGEX }
 
-    private fun matchField(field: String, value: String, mode: Mode, re: Regex?): Boolean =
+    private fun matchField(field: String, value: String, mode: Mode, re: Regex?, caseSensitive: Boolean): Boolean =
         when (mode) {
-            Mode.CONTAINS -> field.contains(value, ignoreCase = true)
-            Mode.EQUALS -> field.equals(value, ignoreCase = true)
+            Mode.CONTAINS -> field.contains(value, ignoreCase = !caseSensitive)
+            Mode.EQUALS -> field.equals(value, ignoreCase = !caseSensitive)
             Mode.REGEX -> re?.containsMatchIn(field) == true
         }
 
@@ -374,3 +385,4 @@ object LogTime {
         return null
     }
 }
+

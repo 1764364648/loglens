@@ -52,7 +52,7 @@
 
 ### 8. Android 16（API 36.1）通知提升守卫与前台标志时序
 - `app/src/main/java/dev/loglens/service/CaptureService.kt:228-241`、`:331-343`
-- 依据：`Notification.Builder#setRequestPromotedOngoing` 在 `api-versions.xml` 里是 `since="36.1"`，Android 16 初版（36.0）没有该方法；原代码只判断 `SDK_INT >= 36`，在 36.0 上会抛 `NoSuchMethodError`（被 `runCatching` 吞掉，但整段提升逻辑失效且每次更新都抛）。`startForegroundCompat` 先把 `foregroundStarted=true` 再调用 `startForeground`，失败时会误以为已在前台。
+- 依据：`Notification.Builder#setRequestPromotedOngoing` 在 SDK 平台自带的 api-versions.xml 里是 `since="36.1"`，Android 16 初版（36.0）没有该方法；原代码只判断 `SDK_INT >= 36`，在 36.0 上会抛 `NoSuchMethodError`（被 `runCatching` 吞掉，但整段提升逻辑失效且每次更新都抛）。`startForegroundCompat` 先把 `foregroundStarted=true` 再调用 `startForeground`，失败时会误以为已在前台。
 - 修复：改用 `Build.VERSION.SDK_INT_FULL >= VERSION_CODES_FULL.BAKLAVA_1` 判断 36.1；`foregroundStarted` 移到 `startForeground` 成功之后。
 
 ### 9. `ShellRunner.exec` 超时/异常路径的流与进程清理
@@ -190,3 +190,4 @@
 - `app/src/main/java/dev/loglens/ui/NetScreen.kt:348`：`NonObservableLocale`，Composable 里读 `Locale.getDefault()`；应改用 `LocalConfiguration`/`LocalLocale`，不影响当前中文界面，本次未动。
 
 基线里的 17 条 `NewApi`（`MetricStyle`/`ProgressStyle`/语义常量）已通过 `@android.annotation.TargetApi(36/37)` 标注说明“只在 guarded 分支调用”而消警；其中真实存在的 API 36.1 守卫错误（`setRequestPromotedOngoing`）已经改代码修复，不是单纯消警。
+

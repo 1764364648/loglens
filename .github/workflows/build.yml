@@ -1,0 +1,122 @@
+name: 构建检查（编译 + 单测）
+
+# 为什么是 pull_request 而不是 pull_request_target：
+#   这个 job 必须真的执行 PR 里的构建脚本（gradlew），所以只能放在隔离环境里跑。
+#   pull_request 触发时 GITHUB_TOKEN 是只读的、仓库 secret 一律不注入，
+#   即使 PR 里塞了恶意 gradle 脚本，也拿不到写权限和密钥。
+#   与 pr-audit / pr-review 的「不执行 PR 代码」原则不冲突：那两个 job 仍然只跑纯 Python 静态规则。
+#   另外 .github/workflows 的改动会被 pr-audit 拦下，PR 无法偷偷改这个文件给自己松绑。
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TARGET_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+  TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  # 便宜的先跑：文档里的「文件:行号」引用是否还指得着东西
+  docs:
+    name: 文档引用
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 取代码（只用 git，不跑任何 action）
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none --no-checkout "https://github.com/$TARGET_REPO.git" w
+          cd w
+          git fetch --quiet --depth 1 origin "$TARGET_SHA"
+          git checkout --quiet FETCH_HEAD
+          git log -1 --format='%h %s'
+      - name: 体检 docs/ 下的文件与行号引用
+        working-directory: w
+        run: python3 tools/check_docs.py
+
+  build:
+    name: 编译 + 单测
+    if: github.event.pull_request.draft != true
+    needs: docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: 取代码（只用 git，不跑任何 action）
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none --no-checkout "https://github.com/$TARGET_REPO.git" w
+          cd w
+          git fetch --quiet --depth 1 origin "$TARGET_SHA"
+          git checkout --quiet FETCH_HEAD
+          git log -1 --format='%h %s'
+          test -f gradlew || { echo "仓库里没有 gradlew"; exit 1; }
+
+      - name: 装 compileSdk 需要的平台（镜像里不一定有 37）
+        run: |
+          set -uo pipefail
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "SDK=$SDK"
+          ls "$SDK/platforms" || true
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -d "$SDK/platforms/android-37" ] && [ -x "$SM" ]; then
+            yes | "$SM" "platforms;android-37" >/dev/null 2>&1 || echo "platforms;android-37 装不上，交给 gradle 报错"
+          fi
+          if [ -x "$SM" ] && [ ! -d "$SDK/build-tools/37.0.0" ]; then
+            yes | "$SM" "build-tools;37.0.0" >/dev/null 2>&1 || true
+          fi
+          ls "$SDK/platforms" || true
+
+      - name: 编译 + 单测
+        working-directory: w
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain --stacktrace \
+            :app:assembleDebug :app:testDebugUnitTest
+
+      - name: 单测结果摘要
+        if: always()
+        working-directory: w
+        run: |
+          python3 - <<'PY'
+          import glob, re, xml.etree.ElementTree as ET
+          total = fail = skip = 0
+          for f in glob.glob("app/build/test-results/testDebugUnitTest/*.xml"):
+              r = ET.parse(f).getroot()
+              total += int(r.get("tests", 0)); fail += int(r.get("failures", 0)) + int(r.get("errors", 0))
+              skip += int(r.get("skipped", 0))
+          print(f"单测：{total} 个，失败 {fail}，跳过 {skip}")
+          if total == 0: print("没跑到任何单测（是不是测试目录被删了？）")
+          PY
+
+      # lint 只报警不拦门：仓库现有 3 条老 error（2 条缺翻译、1 条 Composable 读 Locale），
+      # 一上来就拦门会让所有 PR 变红。等它们修掉再把 continue-on-error 去掉。
+      - name: lint（只看增量，不拦门）
+        continue-on-error: true
+        working-directory: w
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon --console=plain :app:lintDebug || true
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          for f in glob.glob("app/build/reports/lint-results-debug.xml"):
+              r = ET.parse(f).getroot()
+              issues = r.findall("issue")
+              sev = {}
+              for i in issues: sev[i.get("severity")] = sev.get(i.get("severity"), 0) + 1
+              print("lint:", sev)
+              for i in issues:
+                  if i.get("severity") in ("Error", "Fatal"):
+                      loc = i.find("location")
+                      print("  ERROR", i.get("id"), (loc.get("file") if loc is not None else ""),
+                            (loc.get("line") if loc is not None else ""), "-", i.get("message"))
+          PY

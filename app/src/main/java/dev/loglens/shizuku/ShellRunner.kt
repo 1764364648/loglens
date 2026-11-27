@@ -162,9 +162,18 @@ object ShellRunner {
      * 名称来源优先 ARGS（不被截断），避免 `com.tencent.mm:push` 被 `NAME` 列截成 `com.tencent.mm:` 后漏判。
      */
     fun pidsFor(packageName: String, uid: Int): List<Int> {
-        val out = LinkedHashSet<Int>()
-        val text = psTable()
+        val out = LinkedHashSet<Int>(parsePsTable(psTable(), packageName, uid))
+        if (out.isEmpty()) out.addAll(pidsOf(packageName))
+        return out.toList()
+    }
 
+    /**
+     * 纯解析：只吃 ps 的文本输出，不碰 Shizuku、不执行命令。
+     * 抽出来是为了能在 JVM 单测里喂固定的 ps 输出——两种列格式的兼容、u0_a123 换算、
+     * `包名:子进程` 的前缀匹配，这些逻辑一旦写错就是「日志一条都收不到」，不该只靠真机验。
+     */
+    internal fun parsePsTable(text: String, packageName: String, uid: Int): List<Int> {
+        val out = LinkedHashSet<Int>()
         for (raw in text.lineSequence()) {
             val t = raw.trim().split(WHITESPACE)
             if (t.size < 2) continue
@@ -190,8 +199,6 @@ object ShellRunner {
             val uidHit = uidCol != null && uid > 0 && uidCol == uid
             if (nameHit || uidHit) out.add(pid)
         }
-
-        if (out.isEmpty()) out.addAll(pidsOf(packageName))
         return out.toList()
     }
 
