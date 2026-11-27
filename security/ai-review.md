@@ -15,7 +15,7 @@
 工作流 `.github/workflows/pr-review.yml`，`pull_request_target` 触发（`opened` / `synchronize` / `reopened` / `ready_for_review`），草稿不跑。
 
 1. 先从**基线提交**取 `tools/pr_review.py`，PR 里改这个文件对本次评审没影响。
-2. 跑一遍 31 条自测（渲染、去重标记转义、截断、标签映射），脚本被改坏会先在这里红。
+2. 跑一遍 46 条自测（渲染、去重标记转义、截断、标签映射、模型队列轮换），脚本被改坏会先在这里红。
 3. 等 `pr-audit` 的结论最多 90 秒：闸门没过就只写一行“先修阻断项”，不做 AI 评审，省 token。
 4. 取 PR 标题/描述/提交/文件列表/diff（二进制、锁文件、超大文件跳过，单文件 2 万字符、总量 11 万字符封顶），交给模型。
 5. 把模型输出的 JSON 渲染成一条评论：结论、判断依据、改动范围、建议动作、评分与问题表、安全疑点、要作者回答的问题。
@@ -50,7 +50,29 @@
 | 没配 | 零密钥的 OpenAI 兼容免费网关（`text.pollinations.ai`，唯一模型 `openai-fast`，别名 `openai`/`gpt-oss`/`gpt-oss-20b`） | 0 元，开箱即用；实测是小模型档：自称「OpenAI 的 ChatGPT」但给不出版本号，自报知识截止 2024-06，响应 model 字段 `gpt-6-luna-classic`，匿名层频繁 402 限流；**diff 会发给这个第三方网关** |
 | 配了 | 默认智谱 `GLM-4.7-Flash`（`https://open.bigmodel.cn/api/paas/v4`） | 输入输出都免费，200K 上下文，质量明显更好；只需注册一个 key |
 
-配置方式：`Settings → Secrets and variables → Actions` 加 Secret `LLM_API_KEY`；想换别家就再加 Variables `LLM_BASE_URL`（OpenAI 兼容端点）、`LLM_MODEL`（模型名）。
+配置方式：`Settings → Secrets and variables → Actions` 加 Secret `LLM_API_KEY`；想换别家就再加 Variables `LLM_BASE_URL`（OpenAI 兼容端点）、`LLM_MODEL`（模型名）、`LLM_MODELS`（逗号分隔的候选队列）。
+
+### 阿里百炼：一个模型的免费额度用完就换下一个
+
+百炼新号给 70 多个模型**各 100 万 token**免费额度（实名 + 首次开通后自动发，90 天有效，合计 7000 万以上）。
+所以脚本对百炼做了「模型队列」：按“越大越贵 → 越小越稳”排队，**当前一个模型报额度耗尽 / 限流 / 没权限，就自动换下一个**，不用人工改配置，也不傻等重试。
+
+| 顺位 | 模型 | 规模 | 定位 |
+| --- | --- | --- | --- |
+| 1 | `qwen3.8-2.4t-a95b` | 2.4T 总参 / 95B 激活 | 最大的那个，优先吃它 |
+| 2 | `qwen3.8-max` | 旗舰 | 12/36 元每百万 token 标价，但有 100 万免费 |
+| 3 | `qwen3.7-max` | 上一代旗舰 | 同上 |
+| 4 | `qwen3.8-plus` | 中杯 | 便宜、稳 |
+| 5 | `qwen3.8-flash` | 小杯 | 兜底 |
+| 6 | `qwen3-coder-flash` | 代码特化 | 最后一道 |
+
+配上百炼只需要两个变量：
+
+- Secret `LLM_API_KEY`：百炼的 `sk-` key（也认环境变量 `DASHSCOPE_API_KEY`，本机已配好时本地直接能跑）；
+- Variable `LLM_BASE_URL`：`https://dashscope.aliyuncs.com/compatible-mode/v1`
+
+`LLM_MODEL` 可以指定“从哪个模型开始”（它会排到队列第一位，其余照旧兜底）；`LLM_MODELS` 则是直接换掉整条队列。
+评论脚注会写明本次用的是第几个候选，方便事后查到底是哪个模型给的结论。
 
 如果显式把 `LLM_BASE_URL` 指到别的服务却没给密钥，脚本会直接跳过——不会把请求发到不明地址。
 

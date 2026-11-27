@@ -7,8 +7,9 @@
     python tools/pr_review.py --pr 12 --repo 1764364648/loglens --comment
     python tools/pr_review.py --selftest                    # 离线自测（不联网）
 
-环境变量：LLM_API_KEY、LLM_BASE_URL（默认火山方舟）、LLM_MODEL（必须给）。
-没配齐就跳过，不留评论，只写一行说明，退出码 0。
+环境变量：LLM_API_KEY（也认 OPENAI_API_KEY、DASHSCOPE_API_KEY）、LLM_BASE_URL、LLM_MODEL、
+LLM_MODELS（逗号分隔的候选队列，前一个额度用完自动换下一个）。
+没配 key 就走零密钥免费网关，不留空评论。
 """
 import argparse
 import json
@@ -31,6 +32,25 @@ DEFAULT_BASE = "https://open.bigmodel.cn/api/paas/v4"
 DEFAULT_MODEL = "glm-4.7-flash"
 FREE_BASE = "https://text.pollinations.ai/openai"
 FREE_MODEL = "openai"
+
+# 阿里百炼（DashScope）：新号给 70 多个模型各 100 万 token 免费额度（90 天有效）。
+# 一个模型额度用完就换下一个，所以按「越大越贵 → 越小越稳」的顺序排队：
+# 2.4T 总参/95B 激活的大模型放最前，旗舰 Max 次之，最后拿 Flash 兜底。
+DASHSCOPE_HINT = "dashscope"
+DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_CHAIN = (
+    "qwen3.8-2.4t-a95b",   # 2.4 万亿总参、95B 激活
+    "qwen3.8-max",         # 旗舰
+    "qwen3.7-max",         # 上一代旗舰
+    "qwen3.8-plus",        # 中杯
+    "qwen3.8-flash",       # 小杯，兜底
+    "qwen3-coder-flash",   # 代码特化，最后一道
+)
+# 额度耗尽 / 限流 的特征词：命中就换下一个模型，而不是傻等重试
+QUOTA_HINTS = (
+    "quota", "insufficient", "exhaust", "arrear", "balance", "free tier",
+    "rate limit", "too many requests", "额度", "余额", "限流", "欠费", "超过",
+)
 SKIP_EXT = {
     ".jar", ".aar", ".apk", ".aab", ".dex", ".so", ".dll", ".exe", ".bin",
     ".class", ".jks", ".keystore", ".p12", ".pfx", ".zip", ".7z", ".rar",
@@ -233,12 +253,12 @@ def build_user_prompt(meta, files, commits, note, eco=False):
 
 
 # ---------------------------------------------------------------- 模型
-def call_model(base, key, model, messages, timeout=150, max_tokens=2400):
+def call_model(base, key, model, messages, timeout=150, max_tokens=2400, retries=1):
     url = base.rstrip("/") + "/chat/completions"
     payload = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": max_tokens}
     data = json.dumps(payload).encode()
     last = None
-    for attempt in range(2):
+    for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=data, method="POST", headers={
             "Authorization": "Bearer " + key,
             "Content-Type": "application/json",
@@ -258,17 +278,53 @@ def call_model(base, key, model, messages, timeout=150, max_tokens=2400):
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300]
             last = f"HTTP {e.code}: {detail}"
-            if e.code in (429, 500, 502, 503) and attempt == 0:
+            if e.code in (429, 500, 502, 503) and attempt < retries:
                 time.sleep(15)
                 continue
             raise RuntimeError(last)
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
-            if attempt == 0:
+            if attempt < retries:
                 time.sleep(5)
                 continue
             raise RuntimeError(last)
     raise RuntimeError(last or "unknown")
+
+
+def parse_models(value):
+    """把 'a, b;c' 或单个模型名切成列表；空值返回 []。"""
+    return [x.strip() for x in re.split(r"[,;，；]+", value or "") if x.strip()]
+
+
+def is_quota_error(text):
+    low = str(text).lower()
+    return any(h in low for h in QUOTA_HINTS)
+
+
+def provider_chain(base, model, env_models=""):
+    """排队要试哪些模型：显式 LLM_MODELS 优先；百炼在默认队列前面插上配置的模型。"""
+    explicit = parse_models(env_models)
+    if explicit:
+        return explicit + ([model] if model and model not in explicit else [])
+    single = parse_models(model)
+    if DASHSCOPE_HINT in (base or "").lower():
+        return single + [m for m in DASHSCOPE_CHAIN if m not in single]
+    return single or [DEFAULT_MODEL]
+
+
+def call_chain(base, key, models, messages, max_tokens=2400, timeout=150):
+    """按队列依次调用：额度用完/限流就换下一个，返回 (内容, 命中的模型, 试过的模型)。"""
+    tried = []
+    for m in models:
+        try:
+            content = call_model(base, key, m, messages, timeout=timeout,
+                                 max_tokens=max_tokens, retries=0)
+            return content, m, tried
+        except Exception as e:
+            kind = "额度/限流" if is_quota_error(e) else "调用失败"
+            tried.append(m)
+            print(f"模型 {m} {kind}：{clean(e, 160)}", file=sys.stderr)
+    raise RuntimeError(f"候选模型全失败：{'、'.join(tried) or '无'}")
 
 
 def parse_json(text):
@@ -413,11 +469,13 @@ def resolve_provider(api_key, base, model):
 
 
 def run(args):
-    key, base, model, mode = resolve_provider(
-        os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"),
-        os.environ.get("LLM_BASE_URL") or "",
-        os.environ.get("LLM_MODEL") or "",
-    )
+    key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    ali_key = os.environ.get("DASHSCOPE_API_KEY")
+    base = os.environ.get("LLM_BASE_URL") or ""
+    if not key and ali_key:
+        key, base = ali_key, (base or DASHSCOPE_BASE)
+    key, base, model, mode = resolve_provider(key, base, os.environ.get("LLM_MODEL") or "")
+    chain = provider_chain(base, model, os.environ.get("LLM_MODELS") or "") if key else [model]
     gh = token()
 
     if args.stub:
@@ -431,10 +489,11 @@ def run(args):
         return 0
 
     if not (base and model):
-        msg = ("AI 评审未启用：没配 LLM_API_KEY。免费方案是智谱的 GLM-4.7-Flash"
-               "（输入输出都免费，200K 上下文），到 bigmodel.cn 注册领 key，"
-               "在 Settings → Secrets 里加 LLM_API_KEY 即可；要用别家模型再配 "
-               "LLM_BASE_URL 与 LLM_MODEL。")
+        msg = ("AI 评审未启用：没配 LLM_API_KEY。两条免费路子：①阿里百炼，新号每个模型各送 100 万 token，"
+               "加 Secret LLM_API_KEY（sk- 开头）+ Variable LLM_BASE_URL="
+               "https://dashscope.aliyuncs.com/compatible-mode/v1，脚本会自动按队列换模型；"
+               "②智谱 GLM-4.7-Flash，输入输出都免费，LLM_BASE_URL 留空即可。"
+               "用别家模型再配 LLM_MODEL / LLM_MODELS。")
         print(msg)
         if args.summary_file:
             open(args.summary_file, "w", encoding="utf-8").write("<!-- pr-review -->\n" + msg + "\n")
@@ -475,26 +534,18 @@ def run(args):
     eco = False
     user, kept, skipped = build_user_prompt(meta, files, commits, note, eco=eco)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
-    candidates = [model]
-    raw, used, last_err = None, model, None
-    for cand in candidates:
-        try:
-            raw = call_model(base, key, cand, messages, max_tokens=900 if eco else 2400)
-            used = cand
-            break
-        except Exception as e:
-            last_err = e
-            print(f"模型 {cand} 调用失败：{type(e).__name__} {clean(e, 160)}", file=sys.stderr)
-    if raw is None:
-        hint = ""
-        txt = clean(last_err, 200)
-        if "401" in txt or "403" in txt:
-            hint = "（多半是工作流没给 models: read 权限，或密钥没配好）"
-        msg = f"AI 评审这次没跑成：{txt}{hint}。结论以规则闸门和人工 review 为准。"
+    raw, used, tried = None, model, []
+    try:
+        raw, used, tried = call_chain(base, key, chain, messages,
+                                      max_tokens=900 if eco else 2400)
+    except Exception as e:
+        msg = f"AI 评审这次没跑成：{clean(e, 220)}。结论以规则闸门和人工 review 为准。"
         print(msg, file=sys.stderr)
         if args.summary_file:
             open(args.summary_file, "w", encoding="utf-8").write("<!-- pr-review -->\n" + msg + "\n")
         return 0
+    if len(chain) > 1:
+        print(f"本次评审用 {used}（队列共 {len(chain)} 个，试了 {len(tried) + 1} 个）", file=sys.stderr)
 
     rev = normalize(parse_json(raw))
     if rev is None:
@@ -505,6 +556,8 @@ def run(args):
         return 0
 
     label = used + ("（零密钥免费网关，质量一般，建议配免费 key）" if mode == "free" else "")
+    if len(chain) > 1:
+        label += f"（模型队列第 {len(tried) + 1}/{len(chain)} 个）"
     body = render(meta, rev, kept, skipped, label)
     print(body)
     if args.summary_file:
@@ -567,6 +620,36 @@ def selftest():
     k, b, m, mode = resolve_provider("", "https://api.openai.com/v1", "")
     check("外部地址没密钥不硬发", k is None and mode == "none")
     check("默认模型名是免费档", "flash" in DEFAULT_MODEL)
+
+    check("队列按逗号切", parse_models("a, b;c，d") == ["a", "b", "c", "d"])
+    check("空队列", parse_models("") == [] and parse_models(None) == [])
+    check("额度错误识别", is_quota_error("HTTP 429: free tier quota exhausted"))
+    check("余额错误识别", is_quota_error("HTTP 400: 账户余额不足"))
+    check("普通报错不误判", not is_quota_error("HTTP 400: invalid json schema"))
+    chain = provider_chain(DASHSCOPE_BASE, "", "")
+    check("百炼自动排队", chain[0] == DASHSCOPE_CHAIN[0] and len(chain) >= 5)
+    chain = provider_chain(DASHSCOPE_BASE, "qwen3.8-max", "")
+    check("指定模型排第一", chain[0] == "qwen3.8-max" and DASHSCOPE_CHAIN[0] in chain)
+    check("显式队列优先", provider_chain(DASHSCOPE_BASE, "x", "m1,m2")[:2] == ["m1", "m2"])
+    check("非百炼不排队", provider_chain(DEFAULT_BASE, "", "") == [DEFAULT_MODEL])
+
+    def _fake(base, key, model, messages, **kw):
+        if model == "m1":
+            raise RuntimeError("HTTP 429: free quota exhausted")
+        return "ok", None
+
+    def _fake_call(base, key, model, messages, **kw):
+        if model == "m1":
+            raise RuntimeError("HTTP 429: free quota exhausted")
+        return "ok"
+
+    real = globals()["call_model"]
+    globals()["call_model"] = _fake_call
+    try:
+        content, used, tried = call_chain("b", "k", ["m1", "m2"], [])
+        check("额度用完换下一个", content == "ok" and used == "m2" and tried == ["m1"])
+    finally:
+        globals()["call_model"] = real
 
     one, _, _ = collect_diff([{"filename": "big.kt", "patch": "+" + "x" * 30000}], max_file=20000)
     check("单个文件被截断", "已截断" in one)

@@ -3,7 +3,8 @@ name: PR 评审（AI）
 # 建议性评审：先判「这个 PR 合不合理」，合理再评「写得怎么样」。
 # 只读 diff 文本，不 checkout、不执行 PR 代码；只发评论与标签，
 # 不合并、不关闭、不批准 —— 要不要关掉由维护者决定。
-# 免费：没配 LLM_API_KEY 时走零密钥的免费网关；配了就用智谱 GLM-4.7-Flash（输入输出都免费）。
+# 免费：没配 LLM_API_KEY 时走零密钥的免费网关；配了就用配置的模型。
+# 百炼按队列跑（LLM_MODELS 可覆盖）：一个模型免费额度用完自动换下一个。
 on:
   pull_request_target:
     branches: [main]
@@ -45,7 +46,7 @@ jobs:
           print(f"pr_review.py 取自 {sha} {data['sha'][:12]}")
           PY
 
-      - name: 评审脚本自测（36 条，防止渲染与去重逻辑被改坏）
+      - name: 评审脚本自测（46 条，防止渲染、去重与模型轮换逻辑被改坏）
         run: python3 .review/pr_review.py --selftest
 
       - name: 评审并留言
@@ -56,6 +57,7 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_MODELS: ${{ vars.LLM_MODELS }}
         run: |
           set +e
           python3 .review/pr_review.py --pr "$PR" --repo "$REPO" \
