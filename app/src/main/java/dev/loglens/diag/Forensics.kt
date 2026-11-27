@@ -57,6 +57,8 @@ object Forensics {
         /** 0 正常 / 1 待核 / 2 命中问题特征 */
         val level: Int,
         val files: List<File>,
+        /** 与 files 一一对应的大小，落盘时算好：界面别在主线程逐条 length() */
+        val fileSizes: List<Long> = emptyList(),
         val report: String
     )
 
@@ -188,10 +190,11 @@ object Forensics {
             "run-as ${q(pkg)} find files cache -name '*shower*' -o -name '*.log' 2>&1 | head -n 80"
         )
 
-        // 5. 可选：整份 cp 到 /sdcard/Download
+        // 5. 可选：整份 cp 到 /sdcard/Download。文件名带时间戳，避免覆盖上一次的同名文件
+        val copyName = "shower_${stamp()}.log"
         val copy = if (copyToDownload && !missing) step(
             "⑤ 整份复制到 /sdcard/Download",
-            "cp ${q(path)} /sdcard/Download/shower.log 2>&1 ; ls -l /sdcard/Download/shower.log 2>&1",
+            "cp ${q(path)} /sdcard/Download/$copyName 2>&1 ; ls -l /sdcard/Download/$copyName 2>&1",
             120_000L
         ) else null
 
@@ -214,8 +217,9 @@ object Forensics {
             it.keyword == "Releasing active session" || it.keyword == "releaseDisplay"
         }
 
-        val level: Int
-        val verdict: String
+        // 落盘失败时要在结论里改成 NG，所以这里必须是可写的
+        var level = 0
+        var verdict = ""
         when {
             noClient != null -> {
                 level = 2
@@ -246,32 +250,47 @@ object Forensics {
         // ── 落盘 ────────────────────────────────────────────
         val dir = dirOf(context, pkg, started)
         val files = ArrayList<File>()
-        runCatching {
-            File(dir, "server_keyevents.txt").writeText(
-                buildString {
-                    appendLine("# server 关键句抽取　来源：$path")
-                    appendLine("# 关键字：$pattern")
-                    appendLine("# 采集：${DiagRepo.fmtFull(started)}　设备：${Build.MANUFACTURER} ${Build.MODEL}　ROM：${Build.DISPLAY}")
-                    appendLine("# 命令：${key.cmd}")
-                    appendLine("#".repeat(72))
-                    appendLine(key.out)
-                },
-                Charsets.UTF_8
-            )
-            File(dir, "main_filtered.log").writeText(
-                buildString {
-                    appendLine("# main buffer 按 tag 过滤　tags：$tagsDisplay")
-                    appendLine("# 命令：${main.cmd}")
-                    appendLine("#".repeat(72))
-                    appendLine(main.out)
-                },
-                Charsets.UTF_8
-            )
-            if (!missing && tailStep.out.isNotBlank()) {
-                File(dir, "server_tail.log").writeText(tailStep.out, Charsets.UTF_8)
+        // 磁盘满 / 目录只读时原来只表现为「文件列表为空」，用户看不到原因。
+        // 这里逐个文件收集失败原因，最后作为一条 NG 步骤进结论。
+        var writeError: String? = null
+        fun put(name: String, text: String) {
+            if (writeError != null) return
+            try {
+                File(dir, name).writeText(text, Charsets.UTF_8)
+            } catch (t: Throwable) {
+                writeError = "$name 写入失败：${t.message ?: t.javaClass.simpleName}"
             }
-            fallback?.let { File(dir, "runas_find.txt").writeText(it.out, Charsets.UTF_8) }
-            copy?.let { File(dir, "download_copy.txt").writeText(it.out, Charsets.UTF_8) }
+        }
+        put(
+            "server_keyevents.txt",
+            buildString {
+                appendLine("# server 关键句抽取　来源：$path")
+                appendLine("# 关键字：$pattern")
+                appendLine("# 采集：${DiagRepo.fmtFull(started)}　设备：${Build.MANUFACTURER} ${Build.MODEL}　ROM：${Build.DISPLAY}")
+                appendLine("# 命令：${key.cmd}")
+                appendLine("#".repeat(72))
+                appendLine(key.out)
+            }
+        )
+        put(
+            "main_filtered.log",
+            buildString {
+                appendLine("# main buffer 按 tag 过滤　tags：$tagsDisplay")
+                appendLine("# 命令：${main.cmd}")
+                appendLine("#".repeat(72))
+                appendLine(main.out)
+            }
+        )
+        if (!missing && tailStep.out.isNotBlank()) put("server_tail.log", tailStep.out)
+        fallback?.let { put("runas_find.txt", it.out) }
+        copy?.let { put("download_copy.txt", it.out) }
+
+        writeError?.let { err ->
+            val s = Step("⑦ 落盘", "写入 ${dir.absolutePath}", err, false)
+            steps.add(s)
+            onStep(s)
+            if (level < 1) level = 1
+            verdict = "取证结果没能完整落盘：$err。结论仍可用，但导出的文件可能缺失。"
         }
 
         val report = buildString {
@@ -302,7 +321,18 @@ object Forensics {
             }
         }
 
-        runCatching { File(dir, "report.txt").writeText(report, Charsets.UTF_8) }
+        try {
+            File(dir, "report.txt").writeText(report, Charsets.UTF_8)
+        } catch (t: Throwable) {
+            if (writeError == null) {
+                val msg = "report.txt 写入失败：${t.message ?: t.javaClass.simpleName}"
+                val s = Step("⑦ 落盘", "写入 ${dir.absolutePath}", msg, false)
+                steps.add(s)
+                onStep(s)
+                if (level < 1) level = 1
+                verdict = "取证报告没写成功：$msg"
+            }
+        }
 
         runCatching {
             dir.listFiles()?.filter { it.isFile && it.length() > 0 }
@@ -317,6 +347,7 @@ object Forensics {
             verdict = verdict,
             level = level,
             files = files,
+            fileSizes = files.map { runCatching { it.length() }.getOrDefault(0L) },
             report = report
         )
     }

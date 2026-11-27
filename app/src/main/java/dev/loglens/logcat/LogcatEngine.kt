@@ -124,6 +124,10 @@ class LogcatEngine(private val listener: Listener) {
     ) {
         stop()
 
+        // 年份推断缓存是进程级的单例状态，重启会话时清一次：
+        // 设备时间被手动改过（跨年）时，不清会把去年的日志按今年解析
+        runCatching { LogcatParser.resetClock() }
+
         this.packageName = packageName
         this.targetUid = uid ?: 0
         this.buffers = buffers.ifEmpty { LogBuffer.DEFAULT }

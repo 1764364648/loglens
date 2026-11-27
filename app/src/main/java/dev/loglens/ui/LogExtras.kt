@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -459,7 +460,8 @@ fun HighlightRulesDialog(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(200.dp)
+                            .heightIn(max = 200.dp)
+                            .verticalScroll(rememberScrollState())
                     ) {
                         draft.forEachIndexed { index, rule ->
                             Row(
@@ -675,7 +677,11 @@ fun CrashStatsDialog(
                         color = colors.onSurfaceVariant
                     )
                 } else {
-                    Column(Modifier.height(260.dp)) {
+                    Column(
+                        Modifier
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
                         rows.take(50).forEach { agg ->
                             Row(
                                 modifier = Modifier

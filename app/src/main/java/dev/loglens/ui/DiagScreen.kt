@@ -240,6 +240,8 @@ fun DiagScreen(
     var reload by remember { mutableStateOf(0) }
     var globalMode by remember { mutableStateOf(prefs.globalMode) }
     var preview by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    // 预览请求序号：异步读完时如果用户已经关掉或换了文件，这次结果直接作废
+    var previewSeq by remember { mutableStateOf(0) }
     var traceBusy by remember { mutableStateOf(false) }
     var trace by remember { mutableStateOf<DiagRepo.AnrTrace?>(null) }
     val scope = rememberCoroutineScope()
@@ -331,7 +333,7 @@ fun DiagScreen(
                         )
                         Spacer(Modifier.width(8.dp))
                     }
-                    IconButton(onClick = { reload++ }) {
+                    IconButton(onClick = { reload++ }, enabled = !busy) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "刷新", tint = colors.onSurface)
                     }
                     IconButton(onClick = {
@@ -689,13 +691,19 @@ fun DiagScreen(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .clickable(enabled = !r.isDir) {
+                                                    previewSeq += 1
+                                                    val seq = previewSeq
                                                     preview = Triple(r.name, "读取中…", r.path)
                                                     scope.launch {
                                                         val text = withContext(Dispatchers.IO) {
                                                             runCatching { DiagRepo.readHead(r.path, pkg) }
                                                                 .getOrDefault("读取失败")
                                                         }
-                                                        preview = Triple(r.name, text, r.path)
+                                                        // 用户已关掉预览或换了别的文件：结果作废，
+                                                        // 否则关闭后会被异步回调重新弹出来，或旧内容盖掉新预览
+                                                        if (seq == previewSeq && preview?.third == r.path) {
+                                                            preview = Triple(r.name, text, r.path)
+                                                        }
                                                     }
                                                 }
                                                 .padding(vertical = 5.dp),

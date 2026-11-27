@@ -396,7 +396,7 @@ fun ForensicsScreen(
                             modifier = Modifier.padding(start = 4.dp)
                         )
                     }
-                    itemsIndexed(r.files) { _, f ->
+                    itemsIndexed(r.files) { index, f ->
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(14.dp),
@@ -415,7 +415,7 @@ fun ForensicsScreen(
                                         fontFamily = FontFamily.Monospace
                                     )
                                     Text(
-                                        Forensics.human(f.length()),
+                                        Forensics.human(r.fileSizes.getOrElse(index) { 0L }),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = colors.onSurfaceVariant
                                     )

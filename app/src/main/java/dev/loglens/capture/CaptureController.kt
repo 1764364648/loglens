@@ -49,6 +49,15 @@ object CaptureController {
     /** 预录模式：在跑但没落盘，随时可以升级成正式采集 */
     private var passive = false
 
+    /** 预录是否真的在跑。设置页开关读这个，而不是读偏好：偏好开着但预录没跑过就是假开。 */
+    private val _passive = MutableStateFlow(false)
+    val passiveState: StateFlow<Boolean> = _passive
+
+    private fun setPassive(v: Boolean) {
+        passive = v
+        _passive.value = v
+    }
+
     /** 正在换代：主动停旧引擎时 onExit 不能把新会话的状态清掉 */
     private var restarting = false
 
@@ -111,7 +120,7 @@ object CaptureController {
         buffers: Set<LogBuffer> = LogBuffer.DEFAULT
     ) {
         if (appContext == null) {
-            passive = false
+            setPassive(false)
             return
         }
         // 正在预录时点「开始捕获」＝升级为正式采集：不打断流、保留已抓到的内容、只把落盘接上
@@ -121,7 +130,7 @@ object CaptureController {
             restarting = true
             engine?.stop()
             engine = null
-            passive = false
+            setPassive(false)
         } else {
             // 上一次换代若被中途停止，restarting 可能还挂着；新会话必须清掉
             restarting = false
@@ -146,7 +155,7 @@ object CaptureController {
     fun startPassive(app: AppRepository.AppItem) {
         if (appContext == null) return
         if (_state.value is State.Capturing || _state.value is State.Preparing) return
-        passive = true
+        setPassive(true)
         start(
             app = app,
             saveToFile = false,
@@ -253,6 +262,12 @@ object CaptureController {
 
                 if (args.saveToFile && writer == null) {
                     val w = FileLogWriter(ctx)
+                    // 落盘失败（存储满 / 存储被卸载）要让人看见：之前只写 SelfLog，界面一直显示「落盘中」
+                    w.onFatal = { msg ->
+                        _notice.value = msg
+                        _logFile.value = null
+                        SelfLog.w("capture", "落盘已停止：$msg")
+                    }
                     createdWriter = w
                     w.start(app.packageName)
                     writer = w
@@ -306,6 +321,7 @@ object CaptureController {
                         if (engine !== self) return
                         // 主 logcat 失败时 events 流、看门狗线程还活着，必须一起收掉，否则会泄漏进程
                         self?.stop()
+                        setPassive(false)
                         _state.value = State.Failed(message)
                         SelfLog.e("capture", "采集失败 target=${target.packageName} msg=$message")
                         writer?.stop()
@@ -319,6 +335,7 @@ object CaptureController {
                         SelfLog.i("capture", "日志流结束 exit=$code paused=${_paused.value} restarting=$restarting")
                         // 主动暂停 / 预录升级换代引发的退出：保留写入器与参数，别把新会话清掉
                         if (_paused.value || restarting) return
+                        setPassive(false)
                         writer?.stop()
                         writer = null
                         engine = null
@@ -388,7 +405,7 @@ object CaptureController {
         // 调用时在主线程，不能同步等文件收尾，否则点「停止」会卡住界面。
         val toClose = writer
         writer = null
-        passive = false
+        setPassive(false)
         _paused.value = false
         lastArgs = null
         if (_state.value !is State.Failed) {
@@ -450,3 +467,4 @@ object CaptureController {
         _notice.value = "已自动保存崩溃现场：${f.name}"
     }
 }
+

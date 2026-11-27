@@ -31,6 +31,7 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,7 +66,9 @@ import dev.loglens.ui.mx.TextButton
 import dev.loglens.ui.mx.TopAppBar
 import dev.loglens.ui.mx.TopAppBarDefaults
 import dev.loglens.ui.theme.LocalLogPalette
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * 首页只回答一个问题：现在该做什么。
@@ -97,6 +100,7 @@ fun HomeScreen(
     var alive by remember { mutableStateOf(ShizukuHelper.isBinderAlive()) }
     var granted by remember { mutableStateOf(ShizukuHelper.isPermissionGranted()) }
     var autoRequested by remember { mutableStateOf(false) }
+    var restoredPreRecord by remember { mutableStateOf(false) }
     var lastCrash by remember { mutableStateOf(prefs.lastCrash) }
 
     // 高频开关留在首页，改一次立刻写回
@@ -113,8 +117,22 @@ fun HomeScreen(
                 autoRequested = true
                 ShizukuHelper.requestPermission(context) { ok -> granted = ok }
             }
+            // 上次开着预录的话，进程重启后把它接回来：设置里的开关是真在跑的，不是摆设
+            if (alive && granted && prefs.preRecord && !restoredPreRecord) {
+                restoredPreRecord = true
+                val pkg = prefs.lastPackage
+                if (pkg.isNotBlank() && CaptureController.state.value is CaptureController.State.Idle) {
+                    val app = withContext(Dispatchers.IO) { AppRepository.resolve(context, pkg) }
+                    if (app != null) CaptureController.startPassive(app)
+                }
+            }
             delay(1200)
         }
+    }
+
+    // 离开首页就把授权结果监听注销，否则回调 lambda 会一直持有 Activity context
+    DisposableEffect(Unit) {
+        onDispose { ShizukuHelper.releaseListener() }
     }
 
     val capturing = state is CaptureController.State.Capturing
@@ -193,6 +211,7 @@ fun HomeScreen(
     ) { innerPadding ->
         HomeContent(
             innerPadding = innerPadding,
+            alive = alive,
             ready = ready,
             granted = granted,
             needManual = needManual,
@@ -218,6 +237,7 @@ fun HomeScreen(
 @Composable
 private fun HomeContent(
     innerPadding: androidx.compose.foundation.layout.PaddingValues,
+    alive: Boolean,
     ready: Boolean,
     granted: Boolean,
     needManual: Boolean,
@@ -277,6 +297,7 @@ private fun HomeContent(
                         Spacer(Modifier.height(2.dp))
                         Text(
                             text = when {
+                                !alive -> "Shizuku 没在运行，先把它打开"
                                 !granted -> "已连上，还没拿到 shell 身份"
                                 else -> "就绪，shell 身份可用"
                             },
@@ -286,8 +307,16 @@ private fun HomeContent(
                     }
                     Spacer(Modifier.width(8.dp))
                     StatusChip(
-                        label = if (granted) "已就绪" else "未授权",
-                        color = if (granted) palette.info else palette.error
+                        label = when {
+                            !alive -> "未连接"
+                            granted -> "已就绪"
+                            else -> "未授权"
+                        },
+                        color = when {
+                            !alive -> palette.error
+                            granted -> palette.info
+                            else -> palette.error
+                        }
                     )
                 }
 

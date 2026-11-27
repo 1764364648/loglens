@@ -139,17 +139,25 @@ import java.util.Locale
  */
 private object Bookmarks {
     val entries = mutableStateListOf<LogEntry>()
-    private val ids = HashSet<Long>()
+    private val keys = HashSet<String>()
 
-    fun has(id: Long): Boolean = ids.contains(id)
+    /**
+     * 用内容签名做键，不用裸 id：离线导入的日志 id 从 1 起，和实时缓冲的 id 完全重合，
+     * 拿 id 当键会把「离线第 3 条」和「实时第 3 条」当成同一条，收藏互相串。
+     */
+    private fun keyOf(e: LogEntry): String =
+        "${e.time}|${e.pid}|${e.tid}|${e.level.letter}|${e.tag}|${e.message}"
+
+    fun has(entry: LogEntry): Boolean = keys.isNotEmpty() && keys.contains(keyOf(entry))
 
     /** 返回 true 表示本次是「收藏」，false 表示「取消收藏」 */
     fun toggle(entry: LogEntry): Boolean {
-        return if (ids.remove(entry.id)) {
-            entries.removeAll { it.id == entry.id }
+        val k = keyOf(entry)
+        return if (keys.remove(k)) {
+            entries.removeAll { keyOf(it) == k }
             false
         } else {
-            ids.add(entry.id)
+            keys.add(k)
             entries.add(0, entry)
             true
         }
@@ -159,7 +167,7 @@ private object Bookmarks {
 
     fun clear() {
         entries.clear()
-        ids.clear()
+        keys.clear()
     }
 }
 
@@ -232,6 +240,8 @@ private class LogScreenUi(
     var crashCounts by mutableStateOf(Triple(0, 0, 0))
     var findCursor by mutableIntStateOf(-1)
     var expandedFolds by mutableStateOf<Set<String>>(emptySet())
+    // 展开折叠后的定位只能在下一帧做（displayRows 要等重组才更新）
+    var pendingJumpId by mutableStateOf<Long?>(null)
     // 跳转闪烁定位：命中行的 entry.id，2 秒后自动清除
     var jumpFlash by mutableStateOf<Long?>(null)
     var jumpHint by mutableStateOf<String?>(null)
@@ -307,6 +317,12 @@ fun LogScreen(
 
     // 界面状态全部搬进容器；主函数只保留「采集 → 过滤 → 渲染」这条流水线
     val ui = remember { LogScreenUi(prefs, logs.statsSnapshot()) }
+
+    // 浮窗可能在它自己的关闭按钮里被收掉，页面只读进页面时的快照会一直显示「浮窗已开」，
+    // 这里订阅存活状态：无论是谁关的，按钮文案都跟着变
+    LaunchedEffect(Unit) {
+        OverlayLogService.aliveState.collect { ui.overlayAlive = it }
+    }
 
     // 搜索词停留 1.2s 才记进历史，避免边打字边存一堆半截词
     LaunchedEffect(ui.query) {
@@ -436,7 +452,7 @@ fun LogScreen(
         val counts = IntArray(5)
         var prevShown = false
         for (e in snapshot) {
-            val marked = Bookmarks.has(e.id)
+            val marked = Bookmarks.has(e)
             if (!compiled.acceptIgnoringLevel(e, marked, env)) {
                 prevShown = false
                 continue
@@ -473,20 +489,48 @@ fun LogScreen(
         else visible.map { LogRowItem.One(it) }
     }
 
+    // 折叠区间展开后，新行列表要等这次重组结束才拿得到，定位在这里补做
+    LaunchedEffect(displayRows, ui.pendingJumpId) {
+        val id = ui.pendingJumpId ?: return@LaunchedEffect
+        val idx = displayRows.indexOfFirst { it is LogRowItem.One && it.entry.id == id }
+        if (idx >= 0) {
+            runCatching { listState.scrollToItem((idx - 2).coerceAtLeast(0)) }
+            ui.pendingJumpId = null
+        }
+    }
+
     // scan 只读每条日志创建时算好的掩码，是 O(行数) 的位运算（约几十微秒）；
     // 这里刻意不用 remember(visible)：那个 key 会在大列表上做逐元素 equals，反而更贵
     val issueHits = IssueRules.scan(visible)
 
     // 跳到某条日志：索引必须查 displayRows（折叠后与 visible 下标不一致），并高亮闪烁提示落点
     fun jumpToEntry(target: LogEntry) {
-        var idx = displayRows.indexOfFirst { it is LogRowItem.One && it.entry.id == target.id }
+        val idx = displayRows.indexOfFirst { it is LogRowItem.One && it.entry.id == target.id }
         if (idx < 0 && collapseStacks) {
-            val fold = displayRows.firstOrNull {
-                it is LogRowItem.Fold && it.head.id == target.id
-            } as? LogRowItem.Fold
+            val vIdx = visible.indexOfFirst { it.id == target.id }
+            // 目标落在某个折叠区间内部（不是头行）：原来只认 fold.head，必然提示「不在视图内」。
+            // 先展开那个区间，再用 pendingJumpId 在重组后定位。
+            val fold = if (vIdx >= 0) {
+                displayRows.firstOrNull {
+                    it is LogRowItem.Fold && vIdx >= it.start && vIdx < it.end
+                } as? LogRowItem.Fold
+            } else {
+                null
+            }
             if (fold != null) {
                 ui.expandedFolds = ui.expandedFolds + fold.expandKey
-                idx = displayRows.indexOfFirst { it is LogRowItem.Fold && it.head.id == target.id }
+                ui.pendingJumpId = target.id
+                ui.jumpFlash = target.id
+                ui.jumpHint = "已展开折叠区间 · 目标行高亮 2 秒"
+                scope.launch {
+                    delay(2200)
+                    if (ui.jumpFlash == target.id) ui.jumpFlash = null
+                }
+                scope.launch {
+                    delay(4000)
+                    if (ui.jumpHint != null) ui.jumpHint = null
+                }
+                return
             }
         }
         if (idx < 0) {
@@ -576,6 +620,22 @@ fun LogScreen(
                 issueHits = issueHits,
                 onOpenDoc = {
                     openDoc.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
+                },
+                onFindNext = {
+                    if (visible.isNotEmpty()) {
+                        ui.findCursor = (ui.findCursor + 1) % visible.size
+                        // findCursor 是 visible 的下标，不是 LazyColumn 的行号：
+                        // 折叠之后两者行数不同，直接把 cursor 当 index 会滚到列表另一头
+                        val target = visible[ui.findCursor]
+                        val idx = displayRows.indexOfFirst {
+                            it is LogRowItem.One && it.entry.id == target.id
+                        }
+                        if (idx >= 0) {
+                            scope.launch { runCatching { listState.scrollToItem(idx) } }
+                        } else {
+                            jumpToEntry(target)
+                        }
+                    }
                 }
             )
             LogNotices(ui = ui, prefs = prefs, blocked = blocked)
@@ -789,7 +849,9 @@ private fun LogToolsArea(
     state: CaptureController.State,
     logFile: String?,
     issueHits: List<IssueHit>,
-    onOpenDoc: () -> Unit
+    onOpenDoc: () -> Unit,
+    /** 「下一个命中」的定位在 LogScreen 里做：它要按 displayRows 折算出真实行号 */
+    onFindNext: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -892,12 +954,7 @@ private fun LogToolsArea(
         crashSummary = if (ui.crashCounts.first > 0) "崩溃 今日${ui.crashCounts.first}" else "崩溃归集",
         onOpenCrashes = { ui.crashOpen = true },
         findTotal = if (ui.query.isBlank()) 0 else visible.size,
-        onFindNext = {
-            if (visible.isNotEmpty()) {
-                ui.findCursor = (ui.findCursor + 1) % visible.size
-                scope.launch { runCatching { listState.scrollToItem(ui.findCursor) } }
-            }
-        },
+        onFindNext = onFindNext,
         issueSummary = if (issueHits.isEmpty()) "问题体检" else "问题体检 ${issueHits.size}",
         onOpenIssues = { ui.issueOpen = true },
         overlayOn = ui.overlayAlive,
@@ -931,8 +988,11 @@ private fun LogToolsArea(
             }
         },
         onOpenHistory = {
-            ui.fileItems = LogFiles.list(context)
             ui.filesOpen = true
+            ui.fileItems = emptyList()
+            scope.launch {
+                ui.fileItems = withContext(Dispatchers.IO) { LogFiles.list(context) }
+            }
         },
         onSnapshot = {
             if (visible.isEmpty()) {
@@ -1151,7 +1211,7 @@ private fun ColumnScope.LogListArea(
                         when (row) {
                             is LogRowItem.One -> {
                                 val entry = row.entry
-                                val bookmarked = Bookmarks.has(entry.id)
+                                val bookmarked = Bookmarks.has(entry)
                                 LogRow(
                                     entry = entry,
                                     highlightCrash = highlightCrash,
@@ -1210,12 +1270,27 @@ private fun ColumnScope.LogListArea(
                     MinimapBar(
                         rows = visible,
                         onSeek = { ratio ->
-                            // ratio 0 = 小地图顶部 = 最旧的一条。
-                            // reverseLayout 下 index 0 在底部（最新），所以取反；
-                            // 下标也必须按实际渲染的 displayRows 算（折叠后条数不同）。
-                            val last = displayRows.size - 1
-                            val idx = ((1f - ratio) * last).toInt().coerceIn(0, last)
-                            scope.launch { runCatching { listState.scrollToItem(idx) } }
+                            // ratio 0 = 小地图顶部 = 最旧的一条；reverseLayout 下 index 0 在底部。
+                            // 映射先落到 visible 下标，再换算成 displayRows 的行号：折叠区间会压缩行数，
+                            // 直接按 displayRows.size 取比例，折叠越多偏得越远。
+                            val lastV = (visible.size - 1).coerceAtLeast(0)
+                            val vIdx = ((1f - ratio) * lastV).toInt().coerceIn(0, lastV)
+                            val target = visible[vIdx]
+                            val idx = displayRows.indexOfFirst {
+                                it is LogRowItem.One && it.entry.id == target.id
+                            }
+                            if (idx >= 0) {
+                                scope.launch { runCatching { listState.scrollToItem(idx) } }
+                            } else {
+                                // 落在折叠区间内部：展开它，行号由 LogScreen 的 pendingJump 补定位
+                                val fold = displayRows.firstOrNull {
+                                    it is LogRowItem.Fold && vIdx >= it.start && vIdx < it.end
+                                } as? LogRowItem.Fold
+                                if (fold != null) {
+                                    ui.expandedFolds = ui.expandedFolds + fold.expandKey
+                                    ui.pendingJumpId = target.id
+                                }
+                            }
                         },
                         modifier = Modifier
                             .fillMaxHeight()
@@ -1244,7 +1319,7 @@ private fun LogDialogs(
     ui.actionEntry?.let { entry ->
         EntryActionsDialog(
             title = "${entry.level.letter}/${entry.tag}",
-            bookmarked = Bookmarks.has(entry.id),
+            bookmarked = Bookmarks.has(entry),
             onCopy = {
                 Exporter.copy(context, Exporter.formatEntry(entry))
                 Toast.makeText(context, "已复制该行", Toast.LENGTH_SHORT).show()
@@ -1313,9 +1388,14 @@ private fun LogDialogs(
             },
             onShare = { item -> runCatching { LogFiles.share(context, item) } },
             onDelete = { item ->
-                if (LogFiles.remove(item)) {
-                    ui.fileItems = LogFiles.list(context)
-                    Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) { LogFiles.remove(item) }
+                    if (ok) {
+                        ui.fileItems = withContext(Dispatchers.IO) { LogFiles.list(context) }
+                        Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
+                    }
                 }
             },
             onDismiss = { ui.filesOpen = false }
@@ -1436,9 +1516,15 @@ private fun LogDialogs(
                 ui.crashCounts = Triple(0, 0, 0)
             },
             onJump = { agg ->
-                // 跳到列表里第一条同签名日志
+                // 跳到列表里第一条同签名日志。sample 统计时被截断到 600 字，
+                // 所以这里同样按前缀长度比较，别拿完整 message 做全等。
                 ui.crashOpen = false
-                val target = visible.firstOrNull { it.message == agg.sample }
+                val sample = agg.sample
+                val target = if (sample.isBlank()) {
+                    null
+                } else {
+                    visible.firstOrNull { it.message.take(sample.length) == sample }
+                }
                 if (target != null) onJump(target)
                 else Toast.makeText(context, "该崩溃不在当前视图内", Toast.LENGTH_SHORT).show()
             },
@@ -2222,7 +2308,10 @@ private sealed class LogRowItem {
         val id: Long,
         val count: Int,
         val head: LogEntry,
-        val kind: FoldKind = FoldKind.STACK
+        val kind: FoldKind = FoldKind.STACK,
+        /** 折叠覆盖的 visible 区间 [start, end)：跳转到区间内的非头行时要靠它找回 */
+        val start: Int = 0,
+        val end: Int = 0
     ) : LogRowItem() {
         override val key: Any get() = expandKey
 
@@ -2254,7 +2343,11 @@ private fun foldContinuations(
             val run = j - i
             if (run >= 4) {
                 // 折叠头始终保留：展开后还点得到「收起」，否则一展开就再也收不回去
-                out.add(LogRowItem.Fold(id = e.id, count = run, head = e, kind = FoldKind.STACK))
+                out.add(
+                    LogRowItem.Fold(
+                        id = e.id, count = run, head = e, kind = FoldKind.STACK, start = i, end = j
+                    )
+                )
                 if ("fold-${e.id}" in expanded) {
                     for (k in i until j) out.add(LogRowItem.One(rows[k]))
                 }
@@ -2270,7 +2363,11 @@ private fun foldContinuations(
         while (rep < rows.size && isSameLine(rows[rep], e)) rep++
         val repRun = rep - i
         if (repRun >= 3) {
-            out.add(LogRowItem.Fold(id = e.id, count = repRun, head = e, kind = FoldKind.EXACT))
+            out.add(
+                LogRowItem.Fold(
+                    id = e.id, count = repRun, head = e, kind = FoldKind.EXACT, start = i, end = rep
+                )
+            )
             if ("rep-${e.id}" in expanded) {
                 for (k in i until rep) out.add(LogRowItem.One(rows[k]))
             }
@@ -2284,7 +2381,11 @@ private fun foldContinuations(
         while (flood < rows.size && isSameTag(rows[flood], e)) flood++
         val floodRun = flood - i
         if (floodRun >= 8) {
-            out.add(LogRowItem.Fold(id = e.id, count = floodRun, head = e, kind = FoldKind.FLOOD))
+            out.add(
+                LogRowItem.Fold(
+                    id = e.id, count = floodRun, head = e, kind = FoldKind.FLOOD, start = i, end = flood
+                )
+            )
             if ("flood-${e.id}" in expanded) {
                 for (k in i until flood) out.add(LogRowItem.One(rows[k]))
             }

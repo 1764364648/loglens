@@ -31,9 +31,16 @@ import dev.loglens.data.AppGraph
 class OverlayLogService : Service() {
 
     companion object {
-        @Volatile
-        var alive: Boolean = false
-            private set
+        // 浮窗可能在别处（浮窗自己、悬浮球）被关掉，页面不能只靠进页面时的快照，
+        // 这里用 StateFlow 让日志页随时能反映真实存活状态。
+        private val aliveFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val aliveState: kotlinx.coroutines.flow.StateFlow<Boolean> = aliveFlow
+
+        var alive: Boolean
+            get() = aliveFlow.value
+            private set(value) {
+                aliveFlow.value = value
+            }
 
         const val ACTION_START = "dev.loglens.overlay.START"
         const val ACTION_STOP = "dev.loglens.overlay.STOP"
@@ -185,6 +192,16 @@ class OverlayLogService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     lp.x = startX + (event.rawX - downX).toInt()
                     lp.y = startY + (event.rawY - downY).toInt()
+                    runCatching { manager.updateViewLayout(card, lp) }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    // 松手收敛到屏幕内：FLAG_LAYOUT_NO_LIMITS 下拖出边界就再也摸不回来了
+                    val metrics = resources.displayMetrics
+                    val w = card.width.takeIf { it > 0 } ?: dp(300)
+                    val h = card.height.takeIf { it > 0 } ?: dp(120)
+                    lp.x = lp.x.coerceIn(0, (metrics.widthPixels - w).coerceAtLeast(0))
+                    lp.y = lp.y.coerceIn(0, (metrics.heightPixels - h).coerceAtLeast(0))
                     runCatching { manager.updateViewLayout(card, lp) }
                     true
                 }

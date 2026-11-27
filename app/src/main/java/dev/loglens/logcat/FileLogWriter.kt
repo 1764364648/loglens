@@ -37,6 +37,14 @@ class FileLogWriter(private val context: Context) {
     var lastRotateReason: String? = null
         private set
 
+    /** 落盘彻底失败（ENOSPC / 存储被卸载）时回调一次，上层据此提示「已停止落盘」 */
+    @Volatile
+    var onFatal: ((String) -> Unit)? = null
+
+    private fun reportFatal(msg: String) {
+        runCatching { onFatal?.invoke(msg) }
+    }
+
     @Volatile
     var currentFile: File? = null
         private set
@@ -110,6 +118,7 @@ class FileLogWriter(private val context: Context) {
             alive.set(false)
             queue.clear()
             SelfLog.e("writer", "轮转失败，已停止落盘：${lastRotateReason}")
+            reportFatal("轮转失败，已停止落盘：${lastRotateReason}")
             return
         }
         lastRotateReason = "单文件达到 ${limitBytes() / 1024 / 1024} MB，已切到新分片"
@@ -136,6 +145,7 @@ class FileLogWriter(private val context: Context) {
                         alive.set(false)
                         queue.clear()
                         SelfLog.e("writer", "写入失败，已停止落盘", err)
+                        reportFatal("写入失败，已停止落盘（${err.message ?: err.javaClass.simpleName}）。可能是存储已满。")
                         break
                     }
                 }
@@ -151,6 +161,7 @@ class FileLogWriter(private val context: Context) {
                             queue.clear()
                             lastRotateReason = "轮转失败：${it.message ?: it.javaClass.simpleName}"
                             SelfLog.e("writer", "轮转异常，已停止落盘", it)
+                            reportFatal("轮转异常，已停止落盘（${it.message ?: it.javaClass.simpleName}）")
                         }
                     }
                 }

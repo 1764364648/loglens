@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -57,7 +58,11 @@ import dev.loglens.ui.theme.LocalLogPalette
 import dev.loglens.ui.theme.LogPalette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -197,7 +202,14 @@ fun NetScreen(
         if (recording) return@LaunchedEffect
         loading = true
         errorMsg = null
-        val result = runCatching { readSnapshot() }.getOrNull()
+        val result = try {
+            readSnapshot()
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            null
+        }
+        if (!isActive) return@LaunchedEffect
         if (result == null) {
             errorMsg = "读取失败"
         } else if (result.stdout.isBlank()) {
@@ -218,34 +230,44 @@ fun NetScreen(
         loading = false
     }
 
-    // 录制：循环采样 + 合并历史
-    LaunchedEffect(recording) {
+    // 录制：循环采样 + 合并历史。绑在 RESUMED 上：按 Home 后别再每 1.4 秒跑一次 shell
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(recording, lifecycleOwner) {
         if (!recording) return@LaunchedEffect
         loading = true
         errorMsg = null
         var firstRound = true
-        while (true) {
-            val result = runCatching { readSnapshot() }.getOrNull()
-            if (result == null) {
-                errorMsg = "读取失败"
-            } else if (result.stdout.isBlank()) {
-                errorMsg = "读不到 /proc/net：" + result.stderr.trim().ifBlank { "空输出，确认 Shizuku 仍在运行" }
-            } else {
-                val parsed = NetSnapshot.parse(result.stdout)
-                val now = System.currentTimeMillis()
-                tracks = mergeTracks(tracks, parsed, now, KEEP_DEAD_MS)
-                lastSampleAt = now
-                samples = if (firstRound) 1 else samples + 1
-                val pair = resolveUids(pm, parsed, uidPkgs, uidLabels)
-                uidPkgs = pair.first
-                uidLabels = pair.second
-                errorMsg = null
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (isActive) {
+                val result = try {
+                    readSnapshot()
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    null
+                }
+                if (!isActive) return@repeatOnLifecycle
+                if (result == null) {
+                    errorMsg = "读取失败"
+                } else if (result.stdout.isBlank()) {
+                    errorMsg = "读不到 /proc/net：" + result.stderr.trim().ifBlank { "空输出，确认 Shizuku 仍在运行" }
+                } else {
+                    val parsed = NetSnapshot.parse(result.stdout)
+                    val now = System.currentTimeMillis()
+                    tracks = mergeTracks(tracks, parsed, now, KEEP_DEAD_MS)
+                    lastSampleAt = now
+                    samples = if (firstRound) 1 else samples + 1
+                    val pair = resolveUids(pm, parsed, uidPkgs, uidLabels)
+                    uidPkgs = pair.first
+                    uidLabels = pair.second
+                    errorMsg = null
+                }
+                if (firstRound) {
+                    loading = false
+                    firstRound = false
+                }
+                delay(SAMPLE_GAP_MS)
             }
-            if (firstRound) {
-                loading = false
-                firstRound = false
-            }
-            delay(SAMPLE_GAP_MS)
         }
     }
 
@@ -330,6 +352,7 @@ fun NetScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
             Row(
@@ -715,3 +738,4 @@ private fun stateColor(state: String, palette: LogPalette): Color = when (state)
 
     else -> palette.raw
 }
+

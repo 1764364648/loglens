@@ -117,6 +117,8 @@
 
 ## 二、建议修复但未动
 
+> **2026-11-27 补齐**：本节 24 条已逐条改代码并合入 main —— 高优先级 6 条（续行随父行显示、预录改为可观察运行状态且重启后自动接回、预录走前台服务、Shizuku 未运行时的文案三态）、中优先级 9 条（历史文件 IO 移出主线程、授权监听随页面销毁注销、时间轴录制绑 RESUMED、取消异常重新抛出、预览请求加序号、`getPackageInfo`/`label`/`length` 移出组合、取证落盘失败记 NG 步骤、`FileLogWriter` 写失败上报 notice）、低优先级 9 条（崩溃跳转按截断长度比较、书签改用内容签名键、下一个命中/折叠区间/迷你图按下标换行号、高亮与崩溃归集可滚动、浮窗存活改 StateFlow、诊断页刷新按钮 busy 禁用）。下面原文保留，作为问题索引与定位参考。
+
 > 行号是 2026-11 评审当时的快照。`ui/LogScreen.kt` 在之后做过一次拆分（1086 行巨型 composable → `LogScreenUi` 状态容器 + 顶栏/底栏/筛选区/提示区/列表/弹窗六个子 composable），该文件的行号已整体位移，下面按 `LogScreen.kt:NNN` 的引用只保证文件存在且行号在范围内，定位请按同一行给出的标识符/函数名检索。其余文件未动，行号仍然准确。
 
 以下问题均能在代码中直接定位，但要么会改变用户可见的界面/交互（本工单没有 `emulator-5560`，也没有在真机上构造完整采集链路；UI 行为只验证了权限弹窗这一种状态），要么需要跨模块设计取舍，因此没有直接改代码。
@@ -155,6 +157,8 @@
 24. `app/src/main/java/dev/loglens/ui/DiagScreen.kt:313`（刷新按钮）— 刷新/重采集按钮在 `busy` 时未禁用，连续点击会并发跑多份阻塞型 `dumpsys/logcat`，造成资源浪费。
 
 ### 需要真机/环境才能定性的项
+
+> **2026-11-27 更新**：其中可离线落地的不再挂着 —— CSV 公式注入已加前导单引号；`Forensics` 复制到 Download 的文件名改为带时间戳（不再覆盖同名）；浮窗拖动松手收敛回屏幕内；`NetScreen`/`AppPickerScreen` 补 `imePadding`；`LogcatParser.resetClock()` 在每次 `LogcatEngine.start()` 时调用。剩下 `AnrRepo/AnrCli` 与 `/proc/net` 两条本质依赖具体 ROM 行为，保留在此。
 
 - `diag/AnrRepo.kt:167-172` + `diag/cli/AnrCli.kt:99-133`：依赖 `CLASSPATH=<apk> app_process` 与隐藏 `IActivityManager` 反射，代码有 `ERR|` 文本兜底，但能否在目标 ROM/Android 17 上真正返回结构化 ANR 字段需要真机执行验证；`AnrCli.buildArgs` 的 `(0, 40, 0)` int 参数顺序也只是按常见重载推断。
 - `data/NetSnapshot.kt:50-51`：依赖 shell 读取 `/proc/net/{tcp,tcp6,udp,udp6}`，Android 16/17 的部分 ROM/SELinux 策略下可能不可读；已有“读不到 /proc/net”兜底。

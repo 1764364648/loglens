@@ -24,10 +24,14 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -71,7 +75,9 @@ fun SettingsScreen(
     var includeEvents by remember { mutableStateOf(prefs.includeEvents) }
     var globalMode by remember { mutableStateOf(prefs.globalMode) }
     var highlightCrash by remember { mutableStateOf(prefs.highlightCrash) }
-    var preRecord by remember { mutableStateOf(prefs.preRecord) }
+    // 预录开关显示运行时真实状态，不是偏好值：偏好开着但没在跑就是假开
+    val preRecord by CaptureController.passiveState.collectAsState()
+    val capturing = CaptureController.state.collectAsState()
 
     var compactRows by remember { mutableStateOf(prefs.compactRows) }
     var showTime by remember { mutableStateOf(prefs.showTime) }
@@ -88,10 +94,14 @@ fun SettingsScreen(
     var logFileKeep by remember { mutableStateOf(prefs.logFileKeep) }
     var showPrivacy by remember { mutableStateOf(false) }
 
-    val versionName = remember {
-        runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "—"
+    // 版本号要查 PackageManager，别在组合里同步做
+    var versionName by remember { mutableStateOf("—") }
+    LaunchedEffect(Unit) {
+        versionName = withContext(Dispatchers.IO) {
+            runCatching {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName
+            }.getOrNull() ?: "—"
+        }
     }
 
     Scaffold(
@@ -168,18 +178,24 @@ fun SettingsScreen(
                         subtitle = "内存里滚动保留最近若干行，崩溃时把上文存成快照",
                         checked = preRecord
                     ) { on ->
-                        if (on && selected == null && prefs.lastPackage.isBlank()) {
+                        val running = capturing.value is CaptureController.State.Capturing
+                        if (on && running && !preRecord) {
+                            // 正式采集占着唯一的会话，预录没有独立通路，别让开关假装打开
+                            Toast.makeText(
+                                context,
+                                "正式采集中，预录不生效；停止采集后再开",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else if (on && selected == null && prefs.lastPackage.isBlank() && !running) {
                             Toast.makeText(context, "先选一个目标应用再开预录", Toast.LENGTH_SHORT).show()
                         } else {
-                            preRecord = on
                             prefs.preRecord = on
                             if (on) {
-                                // 设设置页进来时可能没带当前选择：回退到上一次用过的目标应用
+                                // 设置页进来时可能没带当前选择：回退到上一次用过的目标应用
                                 val app = selected ?: AppRepository.resolve(context, prefs.lastPackage)
                                 if (app != null) {
                                     CaptureController.startPassive(app)
                                 } else {
-                                    preRecord = false
                                     prefs.preRecord = false
                                     Toast.makeText(context, "找不到上次的目标应用，回首页重选后再开", Toast.LENGTH_SHORT).show()
                                 }
@@ -188,7 +204,7 @@ fun SettingsScreen(
                             }
                         }
                     }
-                    if (CaptureController.isPassive()) {
+                    if (preRecord) {
                         Spacer(Modifier.height(8.dp))
                         Text(
                             "预录运行中：只进内存不写文件。点「开始捕获」会升级为正式录制并落盘。",

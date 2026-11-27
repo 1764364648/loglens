@@ -82,9 +82,8 @@ object ShizukuHelper {
                 // 只有真正被拒绝才记「问过了」。请求还在弹窗中时 shouldShowRationale 也是 false，
                 // 如果在发起前就记，会把「弹窗等待中」误判成「拒绝且不再询问」。
                 if (!granted) context?.let { markAsked(it) }
-                releaseListener()
                 val cb = lastResult
-                lastResult = null
+                releaseListener()
                 cb?.invoke(granted)
             }
         }
@@ -95,17 +94,24 @@ object ShizukuHelper {
             Shizuku.requestPermission(PERMISSION_REQUEST_CODE)
         } catch (t: Throwable) {
             SelfLog.e("shizuku", "请求授权抛出异常", t)
+            val cb = lastResult
             releaseListener()
-            lastResult?.invoke(false)
-            lastResult = null
+            cb?.invoke(false)
         }
     }
 
+    /**
+     * 注销监听并把待回调一起清掉。页面销毁时必须调用：`lastResult` 捕获的是 Activity context，
+     * 不清会把已销毁的页面一直挂在静态字段上。
+     *
+     * 注意：需要回调的调用方要先自己取走 `lastResult`，这里会清空。
+     */
     fun releaseListener() {
         pendingListener?.let {
             runCatching { Shizuku.removeRequestPermissionResultListener(it) }
         }
         pendingListener = null
+        lastResult = null
     }
 
     /** 尝试拉起 Shizuku 或 Sui 管理器 */
