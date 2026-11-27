@@ -10,7 +10,7 @@ body:
 
         1. 装的是 [最新 Release](https://github.com/1764364648/loglens/releases/latest)，不是旧包；
         2. Shizuku 现在是活着的（打开 Shizuku App 看是否显示「运行中」，手机重启过就要重新激活一次）；
-        3. 搜一下 [已有 Issue](../../issues?q=is%3Aissue)，别重复提。
+        3. 搜一下 [已有 Issue](https://github.com/1764364648/loglens/issues?q=is%3Aissue)，别重复提。
 
         运行日志在 **工具箱 → 问题反馈 → 复制诊断**，贴进来比描述一百句都有用。里面只有 LogLens 自己的动作记录，不含被采集应用的内容。
 
