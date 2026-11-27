@@ -41,15 +41,20 @@
 - 模型输出里的 `<!--` 会被转义成 `&lt;!--`，防止它伪造去重标记；
 - 提示词注入最多让它写一段错话，代价是维护者读到一段错话，不是仓库被改。
 
-## 配置
+## 配置（不需要花钱）
 
-在仓库 `Settings → Secrets and variables → Actions`：
+两种模式，按有没有密钥自动切换：
 
-- Secret `LLM_API_KEY`：模型密钥；
-- Variables `LLM_BASE_URL`：OpenAI 兼容端点，默认 `https://ark.cn-beijing.volces.com/api/v3`；
-- Variables `LLM_MODEL`：模型名（如 `doubao-seed-1-6-250615`，以控制台为准）。
+| 有没有 `LLM_API_KEY` | 走哪 | 代价 |
+| --- | --- | --- |
+| 没配 | 零密钥的 OpenAI 兼容免费网关（`text.pollinations.ai`） | 0 元，开箱即用；质量一般、有限速；**diff 会发给这个第三方网关** |
+| 配了 | 默认智谱 `GLM-4.7-Flash`（`https://open.bigmodel.cn/api/paas/v4`） | 输入输出都免费，200K 上下文，质量明显更好；只需注册一个 key |
 
-缺 `LLM_API_KEY` 或 `LLM_MODEL` 时脚本直接跳过、不留评论，工作流仍然绿。
+配置方式：`Settings → Secrets and variables → Actions` 加 Secret `LLM_API_KEY`；想换别家就再加 Variables `LLM_BASE_URL`（OpenAI 兼容端点）、`LLM_MODEL`（模型名）。
+
+如果显式把 `LLM_BASE_URL` 指到别的服务却没给密钥，脚本会直接跳过——不会把请求发到不明地址。
+
+GitHub 自带的 Models 网关（`models.github.ai`）已经不可用：任何路径都返回 `text/plain OK` 的桩，所以没走它。
 
 ## 本地跑
 
@@ -67,3 +72,4 @@ python tools/pr_review.py --stub verdict.json --repo owner/name --pr 1   # 用�
 - 单次约 3 万～4 万输入 token、2 千输出 token；`audit` 没过的 PR 不跑，草稿不跑，同一 PR 新 push 会取消上一次。
 - 它是评审意见，不是放行依据：`main` 的合并仍由「`pr-audit` 必须绿 + 1 次人工批准 + CODEOWNERS」决定。
 - 信息不足时它应该回答“存疑”，而不是猜；看到“存疑”就当你自己要多看一眼。
+
