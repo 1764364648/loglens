@@ -279,6 +279,8 @@ fun LogScreen(
     targetPkg: String,
     state: CaptureController.State,
     onBack: () -> Unit,
+    // 从首页「导入日志文件」进来时，进页就弹文件选择器（不需要 Shizuku，纯离线看别人发来的 log）
+    startWithImport: Boolean = false,
     // 仓库与进程名表从外面注入：默认取 AppGraph 里的全局实例，测试可以换成干净的替身
     logs: LogRepository = AppGraph.logs,
     procs: ProcNames = AppGraph.procs
@@ -305,6 +307,13 @@ fun LogScreen(
                     }
                 }
             }.start()
+        }
+    }
+
+    // 首页「导入日志文件」进来的那一次：页面一出现就把选择器弹出来，省掉「进日志页再点打开文件」两步
+    LaunchedEffect(Unit) {
+        if (startWithImport) {
+            openDoc.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
         }
     }
 

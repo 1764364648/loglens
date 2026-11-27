@@ -80,6 +80,8 @@ private fun AppRoot(host: LogApp) {
         mutableStateOf(AppRepository.resolve(context, prefs.lastPackage))
     }
     var pendingStart by remember { mutableStateOf(false) }
+    // 从首页「导入日志文件」进来时，日志页一出现就把文件选择器弹出来
+    var startWithImport by remember { mutableStateOf(false) }
 
     // 预录开关在冷启动路径上真正生效：之前只有进设置页拨开关才会拉起，
     // 重启后开关亮着却没有任何预录在跑（ADR 里那条已知缺陷）。
@@ -146,6 +148,10 @@ private fun AppRoot(host: LogApp) {
                 CaptureService.cancelSticky(context)
             },
             onOpenLogs = { screen = Screen.Logs },
+            onImportLogs = {
+                startWithImport = true
+                screen = Screen.Logs
+            },
             onOpenSettings = { screen = Screen.Settings },
             onOpenTools = {
                 if (selected == null && prefs.lastPackage.isNotBlank()) {
@@ -213,7 +219,7 @@ private fun AppRoot(host: LogApp) {
             val label = when (val s = state) {
                 is CaptureController.State.Capturing -> s.target.label
                 is CaptureController.State.Preparing -> s.label
-                else -> prefs.lastLabel
+                else -> prefs.lastLabel.ifBlank { if (startWithImport) "离线日志" else "" }
             }
             val pkg = when (val s = state) {
                 is CaptureController.State.Capturing -> s.target.packageName
@@ -224,7 +230,11 @@ private fun AppRoot(host: LogApp) {
                 targetLabel = label,
                 targetPkg = pkg,
                 state = state,
-                onBack = { screen = Screen.Home }
+                onBack = {
+                    startWithImport = false
+                    screen = Screen.Home
+                },
+                startWithImport = startWithImport
             )
         }
 

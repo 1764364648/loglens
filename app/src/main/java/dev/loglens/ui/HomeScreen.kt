@@ -90,6 +90,8 @@ fun HomeScreen(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onOpenLogs: () -> Unit,
+    // 免 Shizuku 的离线入口：挑一个 log 文件当实时缓冲看
+    onImportLogs: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenTools: () -> Unit
 ) {
@@ -205,7 +207,8 @@ fun HomeScreen(
                 },
                 onStart = onStart,
                 onStop = onStop,
-                onOpenLogs = onOpenLogs
+                onOpenLogs = onOpenLogs,
+                onImportLogs = onImportLogs
             )
         }
     ) { innerPadding ->
@@ -595,7 +598,8 @@ private fun HomeActionBar(
     onRequestPermission: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onOpenLogs: () -> Unit
+    onOpenLogs: () -> Unit,
+    onImportLogs: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
     val palette = LocalLogPalette.current
@@ -705,6 +709,22 @@ private fun HomeActionBar(
                         Spacer(Modifier.width(8.dp))
                         Text("开始捕获")
                     }
+                }
+            }
+
+            // 没有 Shizuku 也能干活：别人发来的 log 直接离线看，不依赖 shell 身份
+            if ((!alive || !granted) && !capturing && !preparing) {
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = onImportLogs,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(Icons.Rounded.Terminal, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("导入日志文件（不用 Shizuku）")
                 }
             }
         }
