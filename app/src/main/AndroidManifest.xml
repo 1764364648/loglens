@@ -24,6 +24,7 @@
     <!-- Android 16 起：常驻通知提升为 Promoted Ongoing，即各家「岛」/灵动胶囊通道 -->
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- 悬浮日志窗：不用切回 App 就能看实时尾巴 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
