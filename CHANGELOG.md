@@ -24,6 +24,9 @@
 - `ShellRunner` 的命令包装不再用 `{ cmd ; }` 分组（命令里出现 `}` 会被提前闭合），改成换行拼接。
 - FileProvider 白名单收窄：不再用 `files-path path="."` / `cache-path path="."` 把整个私有目录挂到 `content://` 下，只放开实际会分享的目录。
 - `CaptureController` 从进程级 `object` 单例拆成「`CaptureSession` 实例 + 门面」：会话状态归实例，五个静态测试开关（`CaptureHooks`）删除，单测直接注入假依赖。
+- `CaptureSession` 跨线程读写的 `engine` / `writer` / `restarting` / `passive` / `lastArgs` 补 `@Volatile`：原来主线程写、logcat 读线程读，没有内存屏障时可能长期看到旧值。
+- 崩溃现场快照的写盘从 logcat 读线程挪到 IO 作用域：原来写完那 200 行的瞬间，整条日志流是停的。
+- AI 评审从「每个 PR 自动跑」改成「打 `ai-review` 标签或手动 dispatch 才跑」；`pr-audit`（纯本地规则）保持自动。
 
 ## 1.2.5（2026-11-26）
 

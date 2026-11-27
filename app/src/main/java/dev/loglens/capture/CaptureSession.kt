@@ -36,10 +36,22 @@ import dev.loglens.capture.CaptureController.Target
 internal class CaptureSession(private val deps: CaptureDeps) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // 下面这几个字段都是「一个线程写、另一个线程读」，必须 @Volatile：
+    //  - engine / writer：主线程的 stop()/位置写入，logcat 读线程与看门狗在 onEntry/onStarted/onExit 里读，
+    //    归属校验 `engine !== self` 就是靠读这个字段判断「回调是不是我这条流的」；
+    //  - restarting：写的人可能是主线程（start/stop），读的人是读线程（onExit 里判断要不要收摊）；
+    //  - passive：isPassive() 可能被任意线程调用，升级预录时又要在主线程改。
+    // 没有内存屏障时，读线程可能永远看到旧值，于是「旧流已停、新流没认出来」这种错会偶发。
+    // LogcatEngine 里 restartCount 从 Int 改成 AtomicInteger 的注释说的是同一件事，这里补上。
+    @Volatile
     private var engine: LogcatSource? = null
+
+    @Volatile
     private var writer: LogSink? = null
 
     /** 预录模式：在跑但没落盘，随时可以升级成正式采集 */
+    @Volatile
     private var passive = false
 
     /** 预录是否真的在跑。设置页开关读这个，而不是读偏好：偏好开着但预录没跑过就是假开。 */
@@ -52,6 +64,7 @@ internal class CaptureSession(private val deps: CaptureDeps) {
     }
 
     /** 正在换代：主动停旧引擎时 onExit 不能把新会话的状态清掉 */
+    @Volatile
     private var restarting = false
 
     /**
@@ -64,6 +77,7 @@ internal class CaptureSession(private val deps: CaptureDeps) {
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state
 
+    @Volatile
     private var lastArgs: StartArgs? = null
 
     /** 暂停开关：为 true 时 logcat 已停止读取，但会话、文件写入器与前台通知都保留 */
@@ -273,18 +287,27 @@ internal class CaptureSession(private val deps: CaptureDeps) {
                         if (engine !== self) return
                         deps.logs().add(entry)
                         writer?.enqueue(entry)
-                        val c = ctx
-                        if (entry.isCrash && c != null) {
-                            runCatching { saveCrashSnapshot(c, entry) }
-                                .onFailure { _notice.value = "崩溃快照失败：${it.message ?: it.javaClass.simpleName}" }
-                            runCatching {
-                                CrashNotifier.notifyCrash(
-                                    c,
-                                    entry,
-                                    runCatching { Prefs(c).crashNotify }.getOrDefault(true)
-                                )
-                            }.onFailure { _notice.value = "崩溃通知失败：${it.message ?: it.javaClass.simpleName}" }
+                        val c = ctx ?: return
+                        if (!entry.isCrash) return
+                        // 快照要带「崩溃前 200 行」，这一步是内存读取（微秒级），留在读线程；
+                        // 写盘不是：几百 KB 的 bufferedWriter 压在 logcat 读线程上，
+                        // 写那 200 行的瞬间整条日志流是停的。所以拆成「读线程取快照 + IO 线程写盘」。
+                        val snapshot = beginCrashSnapshot(c)
+                        if (snapshot != null) {
+                            scope.launch {
+                                runCatching { writeCrashSnapshot(snapshot, entry) }
+                                    .onFailure {
+                                        _notice.value = "崩溃快照失败：${it.message ?: it.javaClass.simpleName}"
+                                    }
+                            }
                         }
+                        runCatching {
+                            CrashNotifier.notifyCrash(
+                                c,
+                                entry,
+                                runCatching { Prefs(c).crashNotify }.getOrDefault(true)
+                            )
+                        }.onFailure { _notice.value = "崩溃通知失败：${it.message ?: it.javaClass.simpleName}" }
                     }
 
                     override fun onNotice(text: String) {
@@ -400,40 +423,63 @@ internal class CaptureSession(private val deps: CaptureDeps) {
 
     // ───────────────────────── 崩溃现场快照 ─────────────────────────
 
+    @Volatile
     private var lastSnapshotAt = 0L
+
+    /**
+     * 崩溃快照里「必须先取出来」的部分：目录、时间戳、目标应用、崩溃前 200 行。
+     * 全是内存操作，可以在 logcat 读线程上做。
+     */
+    private class CrashSnapshot(
+        val dir: java.io.File,
+        val stamp: String,
+        val target: String,
+        val recent: List<LogEntry>,
+    )
 
     /**
      * 崩溃一发生就把「崩溃前 200 行 + 崩溃行」单独存一份。
      * 缓冲区本来会被后来的日志滚掉，这份快照是事后唯一还能翻到现场的东西。
      */
-    private fun saveCrashSnapshot(ctx: Context, entry: LogEntry) {
-        val prefs = runCatching { Prefs(ctx) }.getOrNull() ?: return
-        if (!prefs.crashSnapshot) return
+    private fun beginCrashSnapshot(ctx: Context): CrashSnapshot? {
+        val prefs = runCatching { Prefs(ctx) }.getOrNull() ?: return null
+        if (!prefs.crashSnapshot) return null
         val now = System.currentTimeMillis()
-        // 同一波崩溃（SIGABRT 会连着刷十几行）只存一份
-        if (now - lastSnapshotAt < 20_000L) return
+        // 同一波崩溃（SIGABRT 会连着刷十几行）只存一份；先占位再丢给 IO，
+        // 避免同一波的十几个 onEntry 各自排队写一次
+        if (now - lastSnapshotAt < 20_000L) return null
         lastSnapshotAt = now
 
         // 外部目录可能拿不到（存储已卸载/未挂载）：崩溃快照退回内部目录，别让功能静默失效
         val base = ctx.getExternalFilesDir(null) ?: ctx.filesDir
-        val dir = java.io.File(base, "crash").apply { mkdirs() }
-        runCatching {
-            dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(5)?.forEach { it.delete() }
-        }
-        val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date(now))
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+            .format(java.util.Date(now))
         val target = (_state.value as? State.Capturing)?.target?.label ?: "未指定应用"
-        val recent = deps.logs().recent(200)
-        val f = java.io.File(dir, "crash_$stamp.log")
+        return CrashSnapshot(
+            dir = java.io.File(base, "crash"),
+            stamp = stamp,
+            target = target,
+            recent = deps.logs().recent(200),
+        )
+    }
+
+    /** 快照的写盘部分：只从 IO 作用域调用，不占 logcat 读线程。 */
+    private fun writeCrashSnapshot(s: CrashSnapshot, entry: LogEntry) {
+        s.dir.mkdirs()
+        runCatching {
+            s.dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(5)?.forEach { it.delete() }
+        }
+        val f = java.io.File(s.dir, "crash_${s.stamp}.log")
         f.bufferedWriter().use { w ->
-            w.write("===== 崩溃现场快照 $stamp =====")
+            w.write("===== 崩溃现场快照 ${s.stamp} =====")
             w.newLine()
-            w.write("目标应用：$target")
+            w.write("目标应用：${s.target}")
             w.newLine()
             w.write("崩溃行：${entry.level.letter} ${entry.tag}: ${entry.message.take(200)}")
             w.newLine()
-            w.write("—— 崩溃前最近 ${recent.size} 行 ——")
+            w.write("—— 崩溃前最近 ${s.recent.size} 行 ——")
             w.newLine()
-            recent.forEach { e ->
+            s.recent.forEach { e ->
                 val line = if (e.isContinuation) {
                     "    ${e.message}"
                 } else {

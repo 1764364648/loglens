@@ -376,5 +376,21 @@ README 的 R8 描述同步改成「自有类名与方法名会被重命名，只
 
 验证：单测 85 → 86（0 失败）、lint 0 error / 87 warning 不变（没有新增 warning）、`assembleDebug` 通过、`check_docs` 全绿、`pr_review --selftest` 70 条。
 
+### 17. 第七轮评审的三条：并发可见性、崩溃快照的磁盘 IO、CI 工具的复杂度
+
+**A. `CaptureSession` 里有五个字段漏了 `@Volatile`。** `engine` / `writer` / `restarting` / `passive` / `lastArgs` 都是普通 `var`，但写的人和读的人不在同一个线程：主线程 `stop()` 写 `engine = null`，logcat 读线程在 `onEntry` / `onStarted` / `onExit` 里读 `engine !== self` 做归属校验；`restarting` 由主线程（start/stop）写、由读线程（`onExit`）读；`passive` 会被 `isPassive()` 从任意线程读。没有内存屏障时，读线程可能长期看到旧值，症状就是「旧流已停、新流看起来没接上」这类偶发，且时序上极难复现。
+
+全部加 `@Volatile`，并在声明处写清谁写、谁读。同一来源的问题在 `LogcatEngine` 里早就修过一次——`restartCount` 从 `Int` 改成 `AtomicInteger`，注释写着「`++` 不是原子操作，正好落在自愈链最要紧的判断上」。这次是「换了文件就漏了」。
+
+**B. 崩溃快照的写盘跑在 logcat 读线程上。** 原链路 `onEntry` → `saveCrashSnapshot` → `f.bufferedWriter().use { ... }`：200 行、几百 KB 的同步 IO 直接压在采集关键路径上，写的那一瞬间整条日志流是停的。虽然 20 秒节流把量压住了，但位置错了。
+
+拆成两半：`beginCrashSnapshot()` 留在读线程，只做内存取值——目录、时间戳、目标应用、`recent(200)` 快照，并且先把 `lastSnapshotAt` 占位，避免同一波崩溃（SIGABRT 会连刷十几行）各自排队写一次；`writeCrashSnapshot()` 丢进 `scope.launch`，在 IO 上做 `mkdirs`、轮转删旧、写文件，写完再 `_notice` 提示。
+
+**C. 那 2245 行 CI 工具确实用过头了——不删，改成默认不跑。** `tools/pr_review.py` 1169 行 + `tools/pr_audit.py` 680 行 + `tools/check_docs.py` 179 行，比 App 里任何一个模块都重。它要解决的问题是「多人协作时 PR 质量参差」，而这里是单人仓库、一天几十个提交，边际收益接近零；更别扭的是它和「日志不出本机」构成张力——AI 评审会把 PR 的 diff 全文、标题、描述、提交信息发给第三方模型网关。
+
+处理方式是收窄触发，不是删文件：`.github/workflows/pr-review.yml` 从「`opened` / `synchronize` / `reopened` / `ready_for_review` 全触发」改成「PR 打 `ai-review` 标签，或手动 `workflow_dispatch` 指定编号」；`pr-audit` 保持自动——它不联网、不花 token、纯本地规则，守的是「依赖/权限被偷改」，成本可以忽略；`check_docs` 留在 `.github/workflows/build.yml`，数字校验确实是这套工具里最该留的那部分。理由写进 `security/ai-review.md` 的「为什么不自动跑」，SECURITY.md 第 6 条同步改口径。
+
+验证：单测 86 条 0 失败、lint 0 error / 87 warning、`assembleDebug` 通过、workflow 用 PyYAML 解析确认 `on` / `if` / `PR: ${{ ... || inputs.pr }}` 三处合法、`check_docs` 全绿。
+
 
 
