@@ -75,20 +75,22 @@ jobs:
           fi
           ls "$SDK/platforms" || true
 
-      - name: 编译 + 单测
+      # lint 已经清零并进闸门：现在 0 error / 91 warning / 12 hint，
+      # lintDebug 里任何 Error 都会让这个 job 红，新 PR 不能往仓库里加新的硬错误。
+      - name: 编译 + 单测 + lint
         working-directory: w
         run: |
           set -o pipefail
           chmod +x gradlew
           ./gradlew --no-daemon --console=plain --stacktrace \
-            :app:assembleDebug :app:testDebugUnitTest
+            :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
 
-      - name: 单测结果摘要
+      - name: 结果摘要
         if: always()
         working-directory: w
         run: |
           python3 - <<'PY'
-          import glob, re, xml.etree.ElementTree as ET
+          import glob, xml.etree.ElementTree as ET
           total = fail = skip = 0
           for f in glob.glob("app/build/test-results/testDebugUnitTest/*.xml"):
               r = ET.parse(f).getroot()
@@ -96,18 +98,6 @@ jobs:
               skip += int(r.get("skipped", 0))
           print(f"单测：{total} 个，失败 {fail}，跳过 {skip}")
           if total == 0: print("没跑到任何单测（是不是测试目录被删了？）")
-          PY
-
-      # lint 只报警不拦门：仓库现有 3 条老 error（2 条缺翻译、1 条 Composable 读 Locale），
-      # 一上来就拦门会让所有 PR 变红。等它们修掉再把 continue-on-error 去掉。
-      - name: lint（只看增量，不拦门）
-        continue-on-error: true
-        working-directory: w
-        run: |
-          set -o pipefail
-          ./gradlew --no-daemon --console=plain :app:lintDebug || true
-          python3 - <<'PY'
-          import glob, xml.etree.ElementTree as ET
           for f in glob.glob("app/build/reports/lint-results-debug.xml"):
               r = ET.parse(f).getroot()
               issues = r.findall("issue")

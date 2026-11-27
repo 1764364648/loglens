@@ -50,6 +50,7 @@ import dev.loglens.ui.mx.TopAppBar
 import dev.loglens.ui.mx.TopAppBarDefaults
 import dev.loglens.ui.theme.LocalLogPalette
 import dev.loglens.util.ExportFormats
+import dev.loglens.util.versionCodeCompat
 
 /**
  * 问题反馈页：把 LogLens 自己的运行日志摊开，一键复制 / 分享 / 去提 issue。
@@ -274,7 +275,7 @@ private fun buildHeader(
 ): String = buildString {
     runCatching {
         val pi = context.packageManager.getPackageInfo(context.packageName, 0)
-        appendLine("LogLens v${pi.versionName} (code ${pi.longVersionCode})")
+        appendLine("LogLens v${pi.versionName} (code ${pi.versionCodeCompat()})")
     }
     appendLine("设备：${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
     appendLine(
@@ -293,3 +294,5 @@ private fun buildHeader(
     )
     appendLine("上次目标：${prefs.lastLabel.ifBlank { "-" }} / ${prefs.lastPackage.ifBlank { "-" }}")
 }
+
+

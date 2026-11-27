@@ -31,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -167,6 +168,9 @@ fun NetScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    // 语言取自 Compose 的配置快照（LocalConfiguration）而不是 Locale.getDefault()：
+    // 后者在 Composable 里读是「不可观测」的，切换语言不会触发重组（lint NonObservableLocale）。
+    val locale = LocalConfiguration.current.locales[0]
     val colors = MaterialTheme.colorScheme
     val palette = LocalLogPalette.current
 
@@ -345,7 +349,7 @@ fun NetScreen(
                 Spacer(Modifier.weight(1f))
                 Text(
                     text = if (lastSampleAt > 0) {
-                        "采样 " + SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(lastSampleAt))
+                        "采样 " + SimpleDateFormat("HH:mm:ss", locale).format(Date(lastSampleAt))
                     } else {
                         "未采样"
                     },

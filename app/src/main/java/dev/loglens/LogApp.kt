@@ -5,6 +5,7 @@ import dev.loglens.capture.CaptureController
 import dev.loglens.data.Prefs
 import dev.loglens.diag.SelfLog
 import dev.loglens.service.CaptureService
+import dev.loglens.util.versionCodeCompat
 
 class LogApp : Application() {
 
@@ -22,7 +23,7 @@ class LogApp : Application() {
             val pi = packageManager.getPackageInfo(packageName, 0)
             SelfLog.i(
                 "app",
-                "启动 v${pi.versionName} (${pi.longVersionCode}) " +
+                "启动 v${pi.versionName} (${pi.versionCodeCompat()}) " +
                     "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} / API ${android.os.Build.VERSION.SDK_INT}"
             )
         }
@@ -60,3 +61,4 @@ class LogApp : Application() {
             private set
     }
 }
+

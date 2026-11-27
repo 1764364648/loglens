@@ -163,11 +163,13 @@
 - `CaptureService` 的 `State.Failed` 不是服务终止条件：失败后前台服务与通知会保留，直到用户停止；需要真机确认通知被划掉后的系统行为再定。
 - `LogcatParser` 的跨年推断状态为进程级单例且 `resetClock()` 无调用点；设备时间被手动改动时可能给出错误年份，未构造出确定复现路径。
 
-### lint 相关（剩余 3 条未改）
+### lint 相关（当时剩 3 条未改，后续已全部修掉）
 
 - `CaptureService.kt` 的 `MetricStyle`/`ProgressStyle` 调用在 `if (SDK_INT >= 36/37)` 分支内，lint 不做跨函数守卫分析；已给三个 helper 加 `@android.annotation.TargetApi(36/37)` 说明调用前提，17 条 NewApi 全部消警，运行时行为未变。
 - `res/values/strings.xml:4-5` 的两条通知渠道文案没有 `values-en` 翻译（`MissingTranslation`）；应用 UI 本身是中文，补翻译会引出“是否要整体国际化”的产品决定。
 - `ui/NetScreen.kt:348` 在 Composable 里读 `Locale.getDefault()`（`NonObservableLocale`）；应改用 `LocalConfiguration`/`LocalLocale`，属于 Compose 规范问题，不影响当前中文界面。
+
+> 后记：以上 3 条已在后续提交修掉——`values-en/strings.xml` 补了 `capture_channel_name` / `capture_channel_desc` 两条英文文案；`NetScreen` 改用 `LocalConfiguration.current.locales[0]`；两处 `PackageInfo.longVersionCode`（API 28+，minSdk 26）统一走 `dev/loglens/util/AppVersion.kt` 的 `versionCodeCompat()`，26/27 退回 `versionCode`。现在 `lintDebug` 为 0 error / 91 warning / 12 hint，并已进 CI 闸门。
 
 ## 三、已检查无问题
 
@@ -190,4 +192,5 @@
 - `app/src/main/java/dev/loglens/ui/NetScreen.kt:348`：`NonObservableLocale`，Composable 里读 `Locale.getDefault()`；应改用 `LocalConfiguration`/`LocalLocale`，不影响当前中文界面，本次未动。
 
 基线里的 17 条 `NewApi`（`MetricStyle`/`ProgressStyle`/语义常量）已通过 `@android.annotation.TargetApi(36/37)` 标注说明“只在 guarded 分支调用”而消警；其中真实存在的 API 36.1 守卫错误（`setRequestPromotedOngoing`）已经改代码修复，不是单纯消警。
+
 

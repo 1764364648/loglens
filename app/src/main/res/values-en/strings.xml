@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">LogLens</string>
+    <string name="capture_channel_name">Log capture</string>
+    <string name="capture_channel_desc">Keep capturing the target app\'s logs in the background</string>
 </resources>
