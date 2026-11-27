@@ -88,20 +88,23 @@ class CaptureService : Service() {
         observeJob = scope.launch {
             launch {
                 CaptureController.state.collectLatest { state ->
-                    if (state is CaptureController.State.Idle) {
-                        // 会话结束（日志流自然退出 / 用户停止 / 进程被系统重建）：
-                        // 宽限 1.5 秒让前台的「开始 → 跳日志页」切换不至于来回启停，
-                        // 之后仍是空闲就收摊并撤掉常驻通知。
-                        // 不这么做会留一条「等待开始」的前台通知永远挂着。
-                        delay(1_500)
-                        if (!CaptureController.isPaused() &&
-                            CaptureController.state.value is CaptureController.State.Idle
-                        ) {
-                            shutdown()
+                    when (state) {
+                        is CaptureController.State.Idle -> {
+                            // 会话结束（日志流自然退出 / 用户停止 / 进程被系统重建）：
+                            // 宽限 1.5 秒让前台的「开始 → 跳日志页」切换不至于来回启停，
+                            // 之后仍是空闲就收摊并撤掉常驻通知。
+                            // 不这么做会留一条「等待开始」的前台通知永远挂着。
+                            delay(1_500)
+                            if (!CaptureController.isPaused() &&
+                                CaptureController.state.value is CaptureController.State.Idle
+                            ) {
+                                shutdown()
+                            }
                         }
-                        return@collectLatest
+                        // 失败不是「会话进行中」：立刻退出前台并结束服务，只留一条可划掉的说明通知。
+                        is CaptureController.State.Failed -> failAndExit(state)
+                        else -> push(state, CaptureController.paused.value)
                     }
-                    push(state, CaptureController.paused.value)
                 }
             }
             launch {
@@ -363,8 +366,31 @@ class CaptureService : Service() {
 
     private fun cancelNotification() {
         runCatching {
-            getSystemService(NotificationManager::class.java)?.cancel(NOTI_ID)
+            getSystemService(NotificationManager::class.java)?.let {
+                it.cancel(NOTI_ID)
+                it.cancel(NOTI_ID_FAILED)
+            }
         }
+    }
+
+    /**
+     * 采集失败后的收摊。
+     *
+     * 官方口径：Android 13 起用户能直接划掉前台通知，也能从通知栏「使用中的应用」里一键停止
+     * （那一键是把整个进程杀掉，且不给应用任何回调）；Android 14 起连 `setOngoing(true)` 都拦不住划掉。
+     * 所以「失败后继续挂在前台」只会造出一条写着「捕获失败」却仍在运行的服务——用户以为停了，
+     * 实际还在占前台名额。这里退回原设计：退出前台、结束服务，另发一条普通（可划掉）通知说明原因。
+     */
+    private fun failAndExit(state: CaptureController.State.Failed) {
+        stopForegroundCompat()          // 撤前台身份 + 撤常驻通知（各家「岛」也要靠 cancel 收起）
+        lastPostKey = null
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                ?.notify(NOTI_ID_FAILED, buildNotification(state, paused = false))
+        }
+        observeJob?.cancel()
+        observeJob = null
+        stopSelf()
     }
 
     /** 会话结束的统一收摊：撤常驻通知（含岛上的胶囊）、退出前台、结束服务 */
@@ -377,8 +403,9 @@ class CaptureService : Service() {
 
     override fun onDestroy() {
         observeJob?.cancel()
-        // 服务被回收时若已没有会话，别把常驻通知留给下一个人
-        if (CaptureController.state.value !is CaptureController.State.Capturing) cancelNotification()
+        // 服务被回收时若已没有会话，别把常驻通知留给下一个人。
+        // Failed 的说明通知要留着让用户看到原因，所以这里只清 Idle 的残岛。
+        if (CaptureController.state.value is CaptureController.State.Idle) cancelNotification()
         super.onDestroy()
     }
 
@@ -390,6 +417,8 @@ class CaptureService : Service() {
         const val ACTION_PAUSE_TOGGLE = "dev.loglens.PAUSE_TOGGLE"
         private const val CHANNEL_ID = "capture"
         private const val NOTI_ID = 1001
+        /** 失败说明用的普通通知：不带前台身份，用户随时可以划掉 */
+        private const val NOTI_ID_FAILED = 1002
 
         fun ensureChannel(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -427,7 +456,10 @@ class CaptureService : Service() {
         /** UI 侧停止后立刻补一枪撤通知：服务那边只要有一环没走到，通知就变「残岛」 */
         fun cancelSticky(context: Context) {
             runCatching {
-                context.getSystemService(NotificationManager::class.java)?.cancel(NOTI_ID)
+                context.getSystemService(NotificationManager::class.java)?.let {
+                    it.cancel(NOTI_ID)
+                    it.cancel(NOTI_ID_FAILED)
+                }
             }
         }
     }

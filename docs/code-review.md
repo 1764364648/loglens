@@ -173,7 +173,7 @@
 - `util/ExportFormats.kt:159-164`：CSV 前导单引号已加（见上一节 24 条的第 24 号）。
 - `diag/Forensics.kt:194`：Download 文件名已带时间戳。
 - `service/OverlayLogService.kt:155-193`：拖动已收敛回屏幕内。
-- `CaptureService` 的 `State.Failed` 不是服务终止条件：失败后前台服务与通知会保留，直到用户停止；需要真机确认通知被划掉后的系统行为再定。
+- `CaptureService` 的 `State.Failed` 不再是「挂着但不干活」：失败即 `stopForegroundCompat()` + `stopSelf()`，另发一条普通通知（`NOTI_ID_FAILED`）说明原因，用户可随时划掉。依据是官方两条口径：Android 13 起用户可以滑动划掉前台服务通知，也能在通知栏「使用中的应用」里一键停止（那一键会直接杀掉整个进程且不给应用任何回调）；Android 14 起连 `setOngoing(true)` 也拦不住划掉（仅锁屏与「全部清除」例外）。所以失败后继续占着前台身份没有任何收益，只会让通知与实际状态不一致。
 - `LogcatParser` 的跨年推断状态为进程级单例：`resetClock()` 已在每次 `LogcatEngine.start()` 调用（见上一节 24 条的第 18 号）。
 
 ### lint 相关（当时剩 3 条未改，后续已全部修掉）
