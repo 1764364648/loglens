@@ -24,23 +24,23 @@
 - 修复：`openNext()` 返回成功/失败并捕获 I/O 异常；轮转失败时置 `alive=false`、清空待写队列并记录原因；首次 `start()` 失败抛出可读异常由上层展示；写线程里的 `rotate()` 再兜一层 `runCatching`。
 
 ### 3. 采集启停：停止/暂停不再让启动协程“复活”会话
-- `app/src/main/java/dev/loglens/capture/CaptureController.kt:51-56`、`:102-128`、`:159-165`、`:172-243`、`:335-352`
+- `app/src/main/java/dev/loglens/capture/CaptureSession.kt`（拆实例前对应 `CaptureController` 的 51-56、102-128、159-165、172-243、335-352 行；§16 搬家后这些行号失效）
 - 依据：`launchEngine` 在 IO 线程里要经历多次 Shizuku/shell 往返（`shell exec` 还固定带 0.6 秒 `sleep`），而通知里的“停止”从准备阶段就存在。`stop()` 只清字段、不取消在途启动，旧协程随后会重新建 writer、拉起 logcat，把状态写回 `Capturing`，造成“服务已停、采集复活且没有前台服务”。
 - 修复：引入会话令牌 `session`，`start/resume/stop` 自增；启动协程在每个阻塞点后校验令牌，失效时只清理本次创建的 writer/engine 后退出；`onStarted` 也校验令牌；`stop()` 同时复位 `restarting`，避免上一次换代卡死后续 `onExit` 处理。
 
 ### 4. 日志流结束/失败：events 子进程与看门狗线程不再残留
-- `app/src/main/java/dev/loglens/capture/CaptureController.kt:259-285`
+- `app/src/main/java/dev/loglens/capture/CaptureSession.kt`（拆实例前对应 `CaptureController` 的 259-285 行）
 - 依据：events 是独立一条 `logcat` 进程；主 logcat 自然退出时 `onExit` 只停 writer、把 `engine` 置空，从未调用 `engine.stop()`，events 进程和阻塞读线程会失去引用永久残留。
 - 修复：`onFailure`/`onExit` 先调用 `self.stop()` 做完整清理，再处理 writer 与状态。
 
 ### 5. 停止采集：主线程不再 `join(1500)` 等写盘线程
-- `app/src/main/java/dev/loglens/capture/CaptureController.kt:335-352`
+- `app/src/main/java/dev/loglens/capture/CaptureSession.kt`（拆实例前对应 `CaptureController` 的 335-352 行）
 - 依据：`FileLogWriter.stop()` 会 `join(1.5s)`；`CaptureController.stop()` 由首页按钮和通知“停止”在主线程调用，日志量大时界面最长冻结 1.5 秒。
 - 修复：`stop()` 把 writer 收尾投递到 `Dispatchers.IO` 的控制器作用域，主线程立即返回。
 
 ### 6. “最新 N 行”取反：悬浮窗显示最旧 14 行、崩溃快照保存最旧 200 行
 - `app/src/main/java/dev/loglens/data/LogRepository.kt:85-100`
-- `app/src/main/java/dev/loglens/capture/CaptureController.kt:374-384`
+- `app/src/main/java/dev/loglens/capture/CaptureSession.kt`（拆实例前对应 `CaptureController` 的 374-384 行）
 - `app/src/main/java/dev/loglens/service/OverlayLogService.kt:199-207`
 - 依据：`LogRepository.snapshot()` 返回“新→旧”，但两个调用方把它当“旧→新”使用并调用 `takeLast(n)`，实际拿到的是缓冲区最旧的一段。悬浮窗因此在新日志到来时仍显示最早的 14 行；崩溃快照的“崩溃前最近 200 行”也不是崩溃现场。
 - 修复：新增 `LogRepository.recent(n)`（旧→新返回最近 n 条），悬浮窗与崩溃快照改用它。
@@ -128,7 +128,7 @@
 1. `app/src/main/java/dev/loglens/data/ProcNames.kt:29`、`data/LogFilter.kt:203` — `ProcNames.refresh()` 全仓库零调用，`table` 永远是空 Map，`package:` / `process:` / `pkg:` / `proc:` 查询恒匹配不到。需要在采集会话里用 IO 协程周期性刷新并让过滤结果可观察，否则加了刷新也不会触发 UI 重新过滤。
 2. `app/src/main/java/dev/loglens/ui/LogScreen.kt:394-395`（配合 `logcat/LogcatEngine.kt:474-486`）— 实时日志的堆栈续行是 `level=RAW, isContinuation=true`，在 `viewData` 里被 `priority < VERBOSE` 提前过滤，导致实时堆栈永远不显示、`FoldKind.STACK` 永不触发；离线导入的续行会继承上一条级别，可证明这是实时路径的遗漏。修复需要让续行继承父行级别并调整过滤/计数分支，属于会改变列表内容的 UI 行为改动，需真机用真实崩溃验证。
 3. `app/src/main/java/dev/loglens/ui/SettingsScreen.kt:74,167-191` — “崩溃前预录”只读写 `prefs.preRecord`，应用启动路径从不读取它：重启后开关显示开，但没有任何预录在跑；正式采集中打开也会静默失效。需要把“预录是否在跑”改成可观察状态，并决定是否在启动时自动开启（产品行为）。
-4. `app/src/main/java/dev/loglens/capture/CaptureController.kt:134-147` — `startPassive()` 不启动 `CaptureService`，被动预录没有前台服务与常驻通知；切后台后进程可被回收，预录的意义被削弱。需要决定预录是否也常驻通知并补上服务启停与对应的停止路径。
+4. `app/src/main/java/dev/loglens/capture/CaptureSession.kt` — `startPassive()` 不启动 `CaptureService`，被动预录没有前台服务与常驻通知；切后台后进程可被回收，预录的意义被削弱。需要决定预录是否也常驻通知并补上服务启停与对应的停止路径。（§16 拆实例后位置在 `CaptureSession.startPassive`）
 5. `app/src/main/java/dev/loglens/ui/NetScreen.kt:192-213` — 停止“时间轴录制”会触发一次单次采样并用 `mergeTracks(emptyMap(), ...)` 合并，已消失连接立即被清空，与页面/README 承诺的“保留 90 秒”矛盾。改为用现有 `tracks` + `KEEP_DEAD_MS` 合并即可，但会改变页面数据表现。
 6. `app/src/main/java/dev/loglens/ui/HomeScreen.kt:279-291` — Shizuku 未运行（`alive=false`）时状态卡仍写“已连上，还没拿到 shell 身份”，与同页底部“打开 Shizuku”按钮互相矛盾。这是纯文案/状态修复，但属于用户可见 UI 改动，需要前后截图证据。
 
@@ -225,7 +225,7 @@
 先抽端口再注入，不改生产行为：
 
 - `logcat/CapturePorts.kt`：新增 `LogcatSource`（start/stop）与 `LogSink`（onFatal/currentFile/start/enqueue/stop）两个接口，`LogcatEngine` 与 `FileLogWriter` 原样实现它们（后者的 `currentFile` 由私有 `curFile` 只读暴露）。
-- `capture/CaptureHooks.kt`：单测注入点（`allowWithoutContext` / `skipShizukuChecks` / `skipProcRefresh` / `sourceFactory` / `sinkFactory`），默认全空/全 false 时走真实实现，`CaptureController` 里只有读取、没有写入。
+- `capture/CaptureDeps.kt`：会话的外部依赖（`logs` / `procRefresh` / `binderAlive` / `permissionGranted` / `uidOf` / `pidsFor` / `newSource` / `newSink` / `startService` / `appContext`），全部按构造参数注入，默认值指向真实实现。原来是 `CaptureHooks` 的五个静态开关，§16 已删除。
 - `CaptureControllerTest` 4 条：①启动中途 `stop()` 必须回 `Idle`、写入器只关一次、不得拉起引擎；②正常启动后 `stop()` 引擎只 stop 一次；③`stop()` 之后旧引擎才回调 `onStarted` 不得把采集复活；④上一个引擎晚到的 `onExit` 不得把新会话清成 `Idle`。fixture 里显式 `AppGraph.install()`，没有引入 Robolectric。
 
 ### 10. 拆 `LogScreen.kt` —— 原来推掉，本轮补上
@@ -357,6 +357,24 @@ README 的 R8 描述同步改成「自有类名与方法名会被重命名，只
 **⑦ 缺 CONTRIBUTING / CHANGELOG / release notes —— 成立。** 根目录原来只有 README + SECURITY，`.github/` 里模板、CODEOWNERS、四个 workflow 都齐，唯独没有面向贡献者的说明与版本记录。新增 `CHANGELOG.md`（v1.2.1 → 1.2.5 + 未发布段，条目取自真实 tag 与提交，不编造）与 `CONTRIBUTING.md`（提 Issue 前先走「问题反馈」贴自身日志、一个 PR 只做一件事、CI 必须绿、不新增联网 SDK、依赖变更同步 `gradle/verification-metadata.xml`、纯逻辑补 JVM 单测、明确不接受 root / VpnService 抓包 / 换皮收费），README 的「许可」前加「更新记录与参与改进」两行链接。
 
 验证：单测 84 → 85（0 失败，新增 clock 隔离用例）、lint 0 error / 87 warning、`assembleDebug` 通过、`tools/check_docs.py` 113 处引用全部有效、`tools/pr_review.py --selftest` 70 条。README 里「84 条单测」同步改成 85（它的计数校验抓到的就是这个）。
+
+### 16. 把上一条推后的第 ④ 项做完：`CaptureController` 拆成「会话实例 + 门面」
+
+上一轮把它排到后面，理由是 88 处调用点 + 只能真机验证。这一轮单独做，不再和别的改动混在一起。
+
+现状问题：`object CaptureController` 把引擎、写入器、会话令牌、`restarting` / `passive` / `lastArgs` / `lastSnapshotAt` 全挂在进程级单例上，`CaptureHooks` 再用 5 个 `var` 静态开关给单测开后门——`allowWithoutContext`（绕过 `init`）、`skipShizukuChecks`（绕过 binder 与授权）、`skipProcRefresh`、`sourceFactory`、`sinkFactory`。单测跑完必须 `reset()`，否则污染下一个用例；两个用例想同时持有两台会话根本不可能。
+
+改法：
+
+- **`CaptureSession`（internal class）**：全部可变状态与状态机搬进实例——`scope`、`engine`、`writer`、`passive`/`_passive`、`restarting`、`session` 令牌、六个状态流、`lastArgs`、`lastSnapshotAt`，以及 `launchEngine` / `stop` / `pause` / `resume` / 崩溃快照。一个实例就是一份完整会话。
+- **`CaptureDeps`**：外部能力全部变成构造参数 lambda，默认值指向真实实现——`logs`、`procRefresh`（返回进程数，`null` 表示失败；整个字段给 `null` 表示这个会话不刷表）、`binderAlive`、`permissionGranted`、`uidOf`、`pidsFor`、`newSource`、`newSink`、`startService`、`appContext`。`production(context)` 装配真实依赖。
+- **`CaptureController` 只剩门面**：一个 `impl: CaptureSession?` + 逐行委托；`init(context)` 装配生产依赖，`internal install(session)` 供单测注入。`Target` / `State` / `StartArgs` 仍定义在这里，所以 88 个调用点（`CaptureController.state`、`CaptureController.State.Capturing`…）一行都不用改。
+- **删掉 `CaptureHooks`**：五个静态开关全部消失，`CaptureHooks.reset()` 这类「测试之间互相污染」的隐患随之消失。单测改成 `CaptureController.install(CaptureSession(CaptureDeps(appContext = null, binderAlive = { true }, …)))`。
+- **context 的边界重划**：原来「没有 `init(context)` 就整个 start 无效」；现在 `start` 不再检查 context，只有真正需要 Android 的三件事——落盘、拉起前台服务、崩溃快照/通知——在 `appContext == null` 时跳过。生产路径 `LogApp.kt:22` 在 `onCreate` 第一段就 `init(this)`，行为不变。
+
+新增一条验收用例 `sessionStateIsPerInstanceNotGlobal`：两台会话同时进入 Capturing，停掉门面里注入的那台，另一台仍在采、引擎未被 stop——这正是「状态不再全进程一份」的直接证据。
+
+验证：单测 85 → 86（0 失败）、lint 0 error / 87 warning 不变（没有新增 warning）、`assembleDebug` 通过、`check_docs` 全绿、`pr_review --selftest` 70 条。
 
 
 

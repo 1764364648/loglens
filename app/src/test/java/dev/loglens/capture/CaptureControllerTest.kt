@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
  * `CaptureController` 状态机单测。
  *
  * 这个 object 之前零测试，因为它直接吃 `Context` + Shizuku + 真实 logcat 进程，
- * 只能靠真机手动点。用 [CaptureHooks] 注入假引擎与假写入器后，能把「启动中的
+ * 只能靠真机手动点。用 [CaptureDeps] 注入假引擎与假写入器后，能把「启动中的
  * 时间窗」拉长到几秒，把三类只会在真机上偶发的错钉死：
  *
  *  1. 点了开始、还没等 logcat 起来就点停止 —— 必须回 Idle，且不留写入器；
@@ -86,24 +86,38 @@ class CaptureControllerTest {
         isSystem = false
     )
 
+    /** 每个用例可在这里换掉落盘目标（有的用例要卡在 start 中途） */
+    private var sinkFactory: () -> LogSink = { FakeSink(null) }
+
+    private lateinit var session: CaptureSession
+
     @Before
     fun setUp() {
-        CaptureHooks.reset()
-        CaptureHooks.allowWithoutContext = true
-        CaptureHooks.skipShizukuChecks = true
-        CaptureHooks.skipProcRefresh = true
-        CaptureController.stop()
         // 采集会话里 AppGraph.logs 是 lateinit：真机上由 Application 装好，单测里显式装一次
         AppGraph.install()
         sources.clear()
-        CaptureHooks.sourceFactory = { listener -> FakeSource(listener).also { sources.add(it) } }
-        CaptureHooks.sinkFactory = { FakeSink(null) }
+        sinkFactory = { FakeSink(null) }
+        // 依赖全部显式给：没有 init(context)、没有全局静态开关，会话自己就是一份完整状态
+        session = CaptureSession(
+            CaptureDeps(
+                appContext = null,
+                logs = { AppGraph.logs },
+                procRefresh = null,
+                binderAlive = { true },
+                permissionGranted = { true },
+                uidOf = { app.uid },
+                pidsFor = { _, _ -> listOf(4242) },
+                newSource = { listener -> FakeSource(listener).also { sources.add(it) } },
+                newSink = { sinkFactory() },
+                startService = {},
+            )
+        )
+        CaptureController.install(session)
     }
 
     @After
     fun tearDown() {
         CaptureController.stop()
-        CaptureHooks.reset()
     }
 
     private fun awaitTrue(timeoutMs: Long = 2_000, pred: () -> Boolean): Boolean {
@@ -121,7 +135,7 @@ class CaptureControllerTest {
     fun stopDuringStartupLeavesIdleAndClosesSinkOnce() {
         val gate = CountDownLatch(1)
         val sinks = CopyOnWriteArrayList<FakeSink>()
-        CaptureHooks.sinkFactory = { FakeSink(gate).also { sinks.add(it) } }
+        sinkFactory = { FakeSink(gate).also { sinks.add(it) } }
 
         CaptureController.start(app, saveToFile = true, includeEvents = false)
         assertTrue("sinks=${sinks.size} state=${state()}", awaitTrue { sinks.isNotEmpty() })
@@ -193,5 +207,44 @@ class CaptureControllerTest {
         Thread.sleep(150)
         assertTrue("旧引擎的 onExit 不得清掉新会话", state() is CaptureController.State.Capturing)
         assertEquals("新引擎不应被旧回调 stop", 0, second.stops)
+    }
+
+    /**
+     * 这条是重构本身的验收点：会话状态属于实例，不再是全进程一份。
+     * 两台互不相干的会话同时跑，门面里注入的那台停掉，另一台必须还在采。
+     */
+    @Test
+    fun sessionStateIsPerInstanceNotGlobal() {
+        val otherSources = CopyOnWriteArrayList<FakeSource>()
+        val other = CaptureSession(
+            CaptureDeps(
+                appContext = null,
+                logs = { AppGraph.logs },
+                procRefresh = null,
+                binderAlive = { true },
+                permissionGranted = { true },
+                uidOf = { app.uid },
+                pidsFor = { _, _ -> emptyList() },
+                newSource = { listener -> FakeSource(listener).also { otherSources.add(it) } },
+                newSink = { FakeSink(null) },
+                startService = {},
+            )
+        )
+
+        other.start(app, saveToFile = false, includeEvents = false)
+        assertTrue("otherSources=${otherSources.size}", awaitTrue { otherSources.isNotEmpty() })
+        otherSources.single().started()
+        assertTrue("另一台会话应进入 Capturing", awaitTrue { other.state.value is CaptureController.State.Capturing })
+
+        // 门面里注入的是另一台，状态流互不可见
+        assertTrue("门面不应看到另一台会话的状态", state() is CaptureController.State.Idle)
+
+        CaptureController.stop()
+        Thread.sleep(120)
+        assertTrue("停掉门面那台不得影响另一台", other.state.value is CaptureController.State.Capturing)
+        assertEquals("另一台的引擎不应被 stop", 0, otherSources.single().stops)
+
+        other.stop()
+        assertTrue("自己 stop 后才回 Idle", awaitTrue { other.state.value is CaptureController.State.Idle })
     }
 }

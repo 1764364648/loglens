@@ -23,6 +23,7 @@
 - 日志解析的年份推断状态按流拆开：主日志流与 events 流原来是两个线程共用一份，`lastMonth` 会互相顶，跨年判断整段错位。
 - `ShellRunner` 的命令包装不再用 `{ cmd ; }` 分组（命令里出现 `}` 会被提前闭合），改成换行拼接。
 - FileProvider 白名单收窄：不再用 `files-path path="."` / `cache-path path="."` 把整个私有目录挂到 `content://` 下，只放开实际会分享的目录。
+- `CaptureController` 从进程级 `object` 单例拆成「`CaptureSession` 实例 + 门面」：会话状态归实例，五个静态测试开关（`CaptureHooks`）删除，单测直接注入假依赖。
 
 ## 1.2.5（2026-11-26）
 
