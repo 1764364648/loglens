@@ -7,8 +7,11 @@ import java.util.ArrayDeque
  *
  * UI 侧不要每次全量刷新，而是周期性 [drain] 拿新增条目后插入列表头部，
  * 这样 LazyColumn 只做增量 diff，高频日志也不会 ANR。
+ *
+ * 这里是普通 class 而不是 object：实例由 [AppGraph] 注入，测试里可以 new 一个干净的仓库，
+ * 不必在用例之间手工清静态状态。
  */
-object LogRepository {
+class LogRepository(private val defaultCapacity: Int = 5000) {
 
     private val lock = Any()
     private val buffer = ArrayDeque<LogEntry>()
@@ -20,7 +23,7 @@ object LogRepository {
     private var crashValue = 0
 
     @Volatile
-    var capacity: Int = 5000
+    var capacity: Int = defaultCapacity
 
     data class Stats(val total: Long, val crashes: Int)
 

@@ -2,11 +2,10 @@ package dev.loglens.capture
 
 import android.content.Context
 import dev.loglens.data.AppRepository
+import dev.loglens.data.AppGraph
 import dev.loglens.data.LogBuffer
 import dev.loglens.data.LogEntry
-import dev.loglens.data.LogRepository
 import dev.loglens.data.Prefs
-import dev.loglens.data.ProcNames
 import dev.loglens.diag.SelfLog
 import dev.loglens.logcat.CrashNotifier
 import dev.loglens.logcat.FileLogWriter
@@ -209,7 +208,7 @@ object CaptureController {
             var lastCount = -1
             var lastFailAt = 0L
             while (isActive && session.get() == sid) {
-                val ok = runCatching { ProcNames.refresh() }.getOrDefault(false)
+                val ok = runCatching { AppGraph.procs.refresh() }.getOrDefault(false)
                 if (!ok) {
                     // Shizuku 忙时 ps 会偶发超时；表会沿用上一次的，日志里一分钟最多记一条
                     val now = System.currentTimeMillis()
@@ -218,7 +217,7 @@ object CaptureController {
                         lastFailAt = now
                     }
                 } else {
-                    val n = ProcNames.snapshot().size
+                    val n = AppGraph.procs.snapshot().size
                     if (n != lastCount) {
                         SelfLog.i("procs", "ps 表就绪，${n} 个进程")
                         lastCount = n
@@ -234,7 +233,7 @@ object CaptureController {
             try {
                 if (session.get() != sid) return@launch
                 if (clearFirst) {
-                    LogRepository.clear()
+                    AppGraph.logs.clear()
                     _logFile.value = null
                 }
                 _logChannelBlocked.value = false
@@ -283,7 +282,7 @@ object CaptureController {
 
                     override fun onEntry(entry: LogEntry) {
                         if (engine !== self) return
-                        LogRepository.add(entry)
+                        AppGraph.logs.add(entry)
                         writer?.enqueue(entry)
                         if (entry.isCrash) {
                             runCatching { saveCrashSnapshot(ctx, entry) }
@@ -427,7 +426,7 @@ object CaptureController {
         }
         val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date(now))
         val target = (state.value as? State.Capturing)?.target?.label ?: "未指定应用"
-        val recent = LogRepository.recent(200)
+        val recent = AppGraph.logs.recent(200)
         val f = java.io.File(dir, "crash_$stamp.log")
         f.bufferedWriter().use { w ->
             w.write("===== 崩溃现场快照 $stamp =====")

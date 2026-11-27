@@ -2,6 +2,7 @@ package dev.loglens
 
 import android.app.Application
 import dev.loglens.capture.CaptureController
+import dev.loglens.data.AppGraph
 import dev.loglens.data.Prefs
 import dev.loglens.diag.SelfLog
 import dev.loglens.service.CaptureService
@@ -16,6 +17,8 @@ class LogApp : Application() {
         super.onCreate()
         instance = this
         prefs = Prefs(this)
+        // 全局实例只在这里装一次：service / UI / 引擎都从 AppGraph 取，测试可注入替身
+        AppGraph.install()
         CaptureController.init(this)
         CaptureService.ensureChannel(this)
         SelfLog.init(this)

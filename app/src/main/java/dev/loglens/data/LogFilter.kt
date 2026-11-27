@@ -200,7 +200,7 @@ internal object QueryEnvHolder {
     }
 
     private fun refresh(now: Long) {
-        cached = QuerySyntax.Env(ProcNames.snapshot(), now)
+        cached = QuerySyntax.Env(AppGraph.procs.snapshot(), now)
         cachedAt = now
     }
 

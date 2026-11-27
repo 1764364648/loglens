@@ -3,7 +3,7 @@ package dev.loglens.logcat
 import dev.loglens.data.LogBuffer
 import dev.loglens.data.LogEntry
 import dev.loglens.data.LogLevel
-import dev.loglens.data.LogRepository
+import dev.loglens.data.AppGraph
 import dev.loglens.shizuku.ShellRunner
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -403,7 +403,7 @@ class LogcatEngine(private val listener: Listener) {
                 // events 的 payload 形如 [0,4321,com.tencent.mm,u0a123,activity]，按包名筛即可
                 if (!line.contains(packageName)) continue
                 lastDataAt = System.currentTimeMillis()
-                val entry = runCatching { LogcatParser.parse(line) { LogRepository.nextId() } }.getOrNull()
+                val entry = runCatching { LogcatParser.parse(line) { AppGraph.logs.nextId() } }.getOrNull()
                 if (entry != null) {
                     emit(entry.copy(tag = "evt/" + entry.tag))
                 }
@@ -439,7 +439,7 @@ class LogcatEngine(private val listener: Listener) {
                         val accept = acceptAll || pidSet.contains(pid)
                         lastAccepted = accept
                         if (!accept) continue
-                        val entry = LogcatParser.parse(line) { LogRepository.nextId() }
+                        val entry = LogcatParser.parse(line) { AppGraph.logs.nextId() }
                         if (entry != null) {
                             lastTime = entry.time
                             lastTag = entry.tag
@@ -448,7 +448,7 @@ class LogcatEngine(private val listener: Listener) {
                             // 解析失败也要把原始行吐出去，绝不吞日志
                             emit(
                                 LogEntry(
-                                    id = LogRepository.nextId(),
+                                    id = AppGraph.logs.nextId(),
                                     time = line.take(18).trim(),
                                     pid = pid,
                                     tid = 0,
@@ -469,7 +469,7 @@ class LogcatEngine(private val listener: Listener) {
                         continue
                     }
 
-                    val entry = LogcatParser.parse(line) { LogRepository.nextId() }
+                    val entry = LogcatParser.parse(line) { AppGraph.logs.nextId() }
                     if (entry != null) {
                         if (entry.pid > 0 && pidSet.contains(entry.pid)) {
                             lastAccepted = true
@@ -483,7 +483,7 @@ class LogcatEngine(private val listener: Listener) {
                         // 续行：带上一行的时间 / tag
                         emit(
                             LogEntry(
-                                id = LogRepository.nextId(),
+                                id = AppGraph.logs.nextId(),
                                 time = lastTime,
                                 pid = 0,
                                 tid = 0,
@@ -543,7 +543,7 @@ class LogcatEngine(private val listener: Listener) {
         runCatching {
             listener.onEntry(
                 LogEntry(
-                    id = LogRepository.nextId(),
+                    id = AppGraph.logs.nextId(),
                     time = stamp,
                     pid = 0,
                     tid = 0,

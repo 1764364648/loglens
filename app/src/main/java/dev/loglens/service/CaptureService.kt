@@ -13,7 +13,7 @@ import android.os.SystemClock
 import dev.loglens.MainActivity
 import dev.loglens.R
 import dev.loglens.capture.CaptureController
-import dev.loglens.data.LogRepository
+import dev.loglens.data.AppGraph
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -164,9 +164,9 @@ class CaptureService : Service() {
     private fun bodyFor(state: CaptureController.State, paused: Boolean): String = when (state) {
         is CaptureController.State.Capturing -> {
             if (paused) {
-                "会话保留 · 已捕获 ${formatCount(LogRepository.statsSnapshot().total)} 条，点「继续」接着抓"
+                "会话保留 · 已捕获 ${formatCount(AppGraph.logs.statsSnapshot().total)} 条，点「继续」接着抓"
             } else {
-                val stats = LogRepository.statsSnapshot()
+                val stats = AppGraph.logs.statsSnapshot()
                 "已捕获 ${formatCount(stats.total)} 条 · 崩溃 ${stats.crashes}"
             }
         }
@@ -259,7 +259,7 @@ class CaptureService : Service() {
         paused: Boolean
     ): Notification.MetricStyle? {
         val capturing = state as? CaptureController.State.Capturing ?: return null
-        val stats = LogRepository.statsSnapshot()
+        val stats = AppGraph.logs.statsSnapshot()
 
         val style = Notification.MetricStyle()
         style.addMetric(

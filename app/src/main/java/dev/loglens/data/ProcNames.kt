@@ -8,8 +8,15 @@ import dev.loglens.shizuku.ShellRunner
  * logcat 只给 pid/tid，不给进程名。要让 `package:` `process:` 这类查询有东西可比，
  * 就得先有一张 pid 表。这张表由 Shizuku shell 拉 `ps` 生成，几秒内过期也无所谓——
  * 过滤是给人看日志用的，不是拿来做进程审计。
+ *
+ * 普通 class，实例由 [AppGraph] 注入；`ps` 的取数方式从构造参数进（默认就是 Shizuku shell），
+ * 测试里换成固定输出即可验证解析与过期逻辑，不必起设备。
  */
-object ProcNames {
+class ProcNames(
+    private val exec: (String, Long) -> ShellRunner.Result = { cmd, timeout ->
+        ShellRunner.exec(cmd, timeout)
+    }
+) {
 
     @Volatile
     private var table: Map<Int, String> = emptyMap()
@@ -27,11 +34,11 @@ object ProcNames {
 
     /** 拉一次 ps 表。失败保留旧表，不清空，避免过滤条件突然全空。 */
     fun refresh(): Boolean {
-        val text = runCatching { ShellRunner.exec("ps -A -o PID,NAME", 8_000L) }.getOrNull()
+        val text = runCatching { exec("ps -A -o PID,NAME", 8_000L) }.getOrNull()
             ?.takeIf { it.code == 0 }
             ?.stdout
             ?.takeIf { it.isNotBlank() }
-            ?: runCatching { ShellRunner.exec("ps -A", 8_000L) }.getOrNull()
+            ?: runCatching { exec("ps -A", 8_000L) }.getOrNull()
                 ?.takeIf { it.code == 0 }
                 ?.stdout
             ?: return false

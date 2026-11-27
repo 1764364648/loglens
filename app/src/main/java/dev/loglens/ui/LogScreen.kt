@@ -94,6 +94,7 @@ import dev.loglens.data.CrashStats
 import dev.loglens.data.FilterPreset
 import dev.loglens.data.HighlightRule
 import dev.loglens.data.HighlightStore
+import dev.loglens.data.AppGraph
 import dev.loglens.data.LogEntry
 import dev.loglens.data.LogFilter
 import dev.loglens.data.LogLevel
@@ -173,7 +174,11 @@ private object Bookmarks {
  * 它不是 ViewModel：没有生命周期、不读磁盘、不跨页面存活，边界就是这次组合，
  * 与原来 `remember` 的语义完全一致（离开日志页照样丢弃）。
  */
-private class LogScreenUi(val prefs: Prefs) {
+private class LogScreenUi(
+    val prefs: Prefs,
+    // 进来时的统计由外面给，UI 状态自己不碰全局仓库
+    initialStats: LogRepository.Stats = LogRepository.Stats(0, 0)
+) {
 
     private val maxRows = prefs.maxRows
 
@@ -235,7 +240,7 @@ private class LogScreenUi(val prefs: Prefs) {
     var procTick by mutableIntStateOf(0)
     var procRefreshedFor by mutableStateOf<String?>(null)
 
-    var stats by mutableStateOf(LogRepository.statsSnapshot())
+    var stats by mutableStateOf(initialStats)
 
     /** 恢复渲染：把暂停期间压着的行一次性补进列表 */
     fun flushHold(scope: CoroutineScope, listState: LazyListState) {
@@ -263,7 +268,10 @@ fun LogScreen(
     targetLabel: String,
     targetPkg: String,
     state: CaptureController.State,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    // 仓库与进程名表从外面注入：默认取 AppGraph 里的全局实例，测试可以换成干净的替身
+    logs: LogRepository = AppGraph.logs,
+    procs: ProcNames = AppGraph.procs
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -295,10 +303,10 @@ fun LogScreen(
 
     val maxRows = prefs.maxRows
     // 仓库上限跟界面口径对齐，避免内存里留着 5000 行而界面只认 2500
-    LogRepository.capacity = maxRows
+    logs.capacity = maxRows
 
     // 界面状态全部搬进容器；主函数只保留「采集 → 过滤 → 渲染」这条流水线
-    val ui = remember { LogScreenUi(prefs) }
+    val ui = remember { LogScreenUi(prefs, logs.statsSnapshot()) }
 
     // 搜索词停留 1.2s 才记进历史，避免边打字边存一堆半截词
     LaunchedEffect(ui.query) {
@@ -347,7 +355,7 @@ fun LogScreen(
         val q = filter.query
         if (q.isNotBlank() && PROC_QUERY.containsMatchIn(q) && ui.procRefreshedFor != q) {
             ui.procRefreshedFor = q
-            if (withContext(Dispatchers.IO) { ProcNames.refresh() }) ui.procTick++
+            if (withContext(Dispatchers.IO) { procs.refresh() }) ui.procTick++
         }
     }
 
@@ -360,7 +368,7 @@ fun LogScreen(
 
     // 进页面时把缓冲一次性铺上，attach 是原子的，不会和增量通道抢数据
     LaunchedEffect(Unit) {
-        val seed = LogRepository.attach()
+        val seed = logs.attach()
         if (ui.items.isEmpty() && ui.seen.isEmpty()) {
             for (e in seed.asReversed()) {
                 if (ui.seen.add(e.id)) ui.items.add(e)
@@ -374,8 +382,8 @@ fun LogScreen(
     LaunchedEffect(Unit) {
         while (true) {
             delay(160)
-            val batch = LogRepository.drainPending()
-            ui.stats = LogRepository.statsSnapshot()
+            val batch = logs.drainPending()
+            ui.stats = logs.statsSnapshot()
             if (batch.isEmpty()) continue
 
             if (ui.pausedRef.get()) {
@@ -529,7 +537,8 @@ fun LogScreen(
                 visible = visible,
                 prefs = prefs,
                 listState = listState,
-                targetPkg = targetPkg
+                targetPkg = targetPkg,
+                logs = logs
             )
         },
         floatingActionButton = {
@@ -664,7 +673,8 @@ private fun LogBottomBar(
     visible: List<LogEntry>,
     prefs: Prefs,
     listState: LazyListState,
-    targetPkg: String
+    targetPkg: String,
+    logs: LogRepository
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -721,7 +731,7 @@ private fun LogBottomBar(
                 }
             },
             onClear = {
-                LogRepository.clear()
+                logs.clear()
                 ui.items.clear()
                 ui.hold.clear()
                 ui.seen.clear()

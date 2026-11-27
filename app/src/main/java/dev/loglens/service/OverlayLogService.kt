@@ -20,7 +20,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import dev.loglens.data.LogEntry
-import dev.loglens.data.LogRepository
+import dev.loglens.data.AppGraph
 
 /**
  * 悬浮日志窗：不用切回 App 就能看实时日志尾巴。
@@ -198,7 +198,7 @@ class OverlayLogService : Service() {
 
     private fun render() {
         val view = body ?: return
-        val tail = LogRepository.recent(14)
+        val tail = AppGraph.logs.recent(14)
         if (tail.isEmpty()) {
             view.text = "等待日志…"
             return

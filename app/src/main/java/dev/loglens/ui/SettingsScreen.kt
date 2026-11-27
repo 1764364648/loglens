@@ -37,7 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.loglens.capture.CaptureController
 import dev.loglens.data.AppRepository
-import dev.loglens.data.LogRepository
+import dev.loglens.data.AppGraph
 import dev.loglens.data.Prefs
 import dev.loglens.ui.mx.Card
 import dev.loglens.ui.mx.CardDefaults
@@ -288,14 +288,14 @@ fun SettingsScreen(
                             if (maxRows > 500) {
                                 maxRows -= 500
                                 prefs.maxRows = maxRows
-                                LogRepository.capacity = maxRows
+                                AppGraph.logs.capacity = maxRows
                             }
                         },
                         onPlus = {
                             if (maxRows < 20000) {
                                 maxRows += 500
                                 prefs.maxRows = maxRows
-                                LogRepository.capacity = maxRows
+                                AppGraph.logs.capacity = maxRows
                             }
                         }
                     )
