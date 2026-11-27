@@ -1,0 +1,30 @@
+# 依赖白名单：PR 想加依赖，必须由维护者先在这一行加上坐标，否则审计直接阻断。
+# 格式：一个坐标一行，group:artifact，不带版本。带注释可以，空行忽略。
+# 加新依赖时同步做两件事：更新这里 + 重新生成 gradle/verification-metadata.xml。
+
+# AndroidX 基础
+androidx.core:core-ktx
+androidx.activity:activity-compose
+androidx.lifecycle:lifecycle-runtime-ktx
+androidx.lifecycle:lifecycle-viewmodel-compose
+
+# Compose（BOM 统一版本）
+androidx.compose:compose-bom
+androidx.compose.ui:ui
+androidx.compose.ui:ui-graphics
+androidx.compose.ui:ui-tooling-preview
+androidx.compose.ui:ui-tooling
+androidx.compose.material3:material3
+androidx.compose.material:material-icons-extended
+androidx.compose.animation:animation
+
+# UI 外观
+top.yukonga.miuix.kmp:miuix-ui-android
+top.yukonga.miuix.kmp:miuix-icons-android
+
+# 协程
+org.jetbrains.kotlinx:kotlinx-coroutines-android
+
+# Shizuku
+dev.rikka.shizuku:api
+dev.rikka.shizuku:provider

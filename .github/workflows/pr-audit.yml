@@ -1,0 +1,49 @@
+name: PR 审计
+
+# 只跑基线（main）里的这个文件，不 checkout PR 里的任何代码，也不跑 PR 的脚本。
+# 目的是回答一件事：这个 PR 有没有偷偷加联网、新权限、新依赖、二进制或动构建脚本。
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-audit:
+    name: pr-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: 从基线取审计脚本（不执行 PR 代码）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, pathlib, urllib.request
+          repo, sha = os.environ["REPO"], os.environ["BASE_SHA"]
+          url = f"https://api.github.com/repos/{repo}/contents/tools/pr_audit.py?ref={sha}"
+          req = urllib.request.Request(url, headers={
+              "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+              "Accept": "application/vnd.github+json"})
+          data = json.load(urllib.request.urlopen(req, timeout=30))
+          pathlib.Path(".audit").mkdir(exist_ok=True)
+          pathlib.Path(".audit/pr_audit.py").write_bytes(base64.b64decode(data["content"]))
+          print("审计脚本取自基线提交", data["sha"][:12])
+          PY
+
+      - name: 审计 PR diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          python3 .audit/pr_audit.py --pr "$PR" --repo "$REPO" --summary-file audit.md > /dev/null 2> audit.err
+          code=$?
+          cat audit.err >&2 || true
+          { echo "<!-- pr-audit -->"; cat audit.md; } >> "$GITHUB_STEP_SUMMARY"
+          exit $code
