@@ -1,4 +1,4 @@
-﻿package dev.loglens.ui
+package dev.loglens.ui
 
 import android.widget.Toast
 import android.content.Intent
@@ -97,6 +97,7 @@ import dev.loglens.data.LogLevel
 import dev.loglens.data.LogRepository
 import dev.loglens.data.Prefs
 import dev.loglens.data.PresetStore
+import dev.loglens.data.ProcNames
 import dev.loglens.logcat.DeviceLogGuard
 import dev.loglens.ui.mx.BottomAppBar
 import dev.loglens.ui.mx.ButtonDefaults
@@ -296,6 +297,18 @@ fun LogScreen(
     }
     val compiled = remember(filter) { CompiledFilter(filter) }
 
+    // package: / process: 这类查询靠 pid→进程名表；表是空的就现拉一次，
+    // 放 IO 线程，不卡列表。拉到了用一个计数触发 viewData 重算。
+    var procTick by remember { mutableIntStateOf(0) }
+    var procRefreshedFor by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(filter.query) {
+        val q = filter.query
+        if (q.isNotBlank() && PROC_QUERY.containsMatchIn(q) && procRefreshedFor != q) {
+            procRefreshedFor = q
+            if (withContext(Dispatchers.IO) { ProcNames.refresh() }) procTick++
+        }
+    }
+
     val listState = rememberLazyListState()
     // 统计数字不再逐条推流（原本每条日志写两次 StateFlow 纯属浪费），
     // 改成跟 UI 的 160ms 批次一起取：肉眼无差别，采集侧少掉一整套唤醒与分配
@@ -383,15 +396,26 @@ fun LogScreen(
     // 一遍遍历同时得到「可视行」和「各级别条数」：
     // 两者只差一个 minPriority，所以先用不含级别的条件判一次，再各取所需。
     // 原来这里是两次全缓冲过滤 + 一次 distinctBy 装箱，2500 行下每 160ms 都要重跑一轮。
-    val viewData = remember(snapshot, compiled, filter.minPriority, viewKey) {
+    val viewData = remember(snapshot, compiled, filter.minPriority, viewKey, procTick) {
         val env = compiled.env()
         val rows = ArrayList<LogEntry>(snapshot.size)
         val counts = IntArray(5)
+        var prevShown = false
         for (e in snapshot) {
             val marked = Bookmarks.has(e.id)
-            if (!compiled.acceptIgnoringLevel(e, marked, env)) continue
+            if (!compiled.acceptIgnoringLevel(e, marked, env)) {
+                prevShown = false
+                continue
+            }
             val p = e.level.priority
-            // RAW 行（priority -1）不参与计数也不显示，与原逻辑一致
+            if (e.isContinuation) {
+                // 续行（异常堆栈体）是 RAW，但它是上一行的内容：上一行过筛就跟着显示。
+                // 它不参与级别计数，否则一次崩溃的几十行堆栈会把 ERROR 计数撑大
+                if (prevShown) rows.add(e)
+                continue
+            }
+            prevShown = false
+            // 非续行的纯 RAW 行不参与计数也不显示，与原逻辑一致
             if (p < LogLevel.VERBOSE.priority) continue
             when {
                 p >= LogLevel.ERROR.priority -> counts[4]++
@@ -400,7 +424,10 @@ fun LogScreen(
                 p >= LogLevel.DEBUG.priority -> counts[1]++
                 else -> counts[0]++
             }
-            if (p >= filter.minPriority) rows.add(e)
+            if (p >= filter.minPriority) {
+                rows.add(e)
+                prevShown = true
+            }
         }
         rows to counts
     }
@@ -2130,3 +2157,7 @@ private fun FoldRow(
         )
     }
 }
+
+/** 查询里出现 package:/pkg:/app:/process:/proc: 时，说明要先备好 pid→进程名表 */
+private val PROC_QUERY = Regex("""(?:^|\s)(?:package|pkg|app|process|proc)[~=]?:""", RegexOption.IGNORE_CASE)
+

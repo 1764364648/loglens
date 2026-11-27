@@ -3,6 +3,7 @@ package dev.loglens.shizuku
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import dev.loglens.diag.SelfLog
 import rikka.shizuku.Shizuku
 
 /**
@@ -64,10 +65,12 @@ object ShizukuHelper {
 
     fun requestPermission(context: Context? = null, onResult: (Boolean) -> Unit) {
         if (!isBinderAlive()) {
+            SelfLog.w("shizuku", "请求授权：binder 不可用，直接返回 false")
             onResult(false)
             return
         }
         if (isPermissionGranted()) {
+            SelfLog.i("shizuku", "请求授权：已有权限")
             onResult(true)
             return
         }
@@ -75,6 +78,7 @@ object ShizukuHelper {
         val listener = Shizuku.OnRequestPermissionResultListener { code, grantResult ->
             if (code == PERMISSION_REQUEST_CODE) {
                 val granted = grantResult == PackageManager.PERMISSION_GRANTED
+                SelfLog.i("shizuku", "授权结果：granted=$granted (code=$code, result=$grantResult)")
                 // 只有真正被拒绝才记「问过了」。请求还在弹窗中时 shouldShowRationale 也是 false，
                 // 如果在发起前就记，会把「弹窗等待中」误判成「拒绝且不再询问」。
                 if (!granted) context?.let { markAsked(it) }
@@ -90,6 +94,7 @@ object ShizukuHelper {
             Shizuku.addRequestPermissionResultListener(listener)
             Shizuku.requestPermission(PERMISSION_REQUEST_CODE)
         } catch (t: Throwable) {
+            SelfLog.e("shizuku", "请求授权抛出异常", t)
             releaseListener()
             lastResult?.invoke(false)
             lastResult = null

@@ -3,6 +3,7 @@ package dev.loglens
 import android.app.Application
 import dev.loglens.capture.CaptureController
 import dev.loglens.data.Prefs
+import dev.loglens.diag.SelfLog
 import dev.loglens.service.CaptureService
 
 class LogApp : Application() {
@@ -16,6 +17,15 @@ class LogApp : Application() {
         prefs = Prefs(this)
         CaptureController.init(this)
         CaptureService.ensureChannel(this)
+        SelfLog.init(this)
+        runCatching {
+            val pi = packageManager.getPackageInfo(packageName, 0)
+            SelfLog.i(
+                "app",
+                "启动 v${pi.versionName} (${pi.longVersionCode}) " +
+                    "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} / API ${android.os.Build.VERSION.SDK_INT}"
+            )
+        }
 
         // 本应用自身崩溃也留档：外部目录落文件（无需 adb 也能导），并写进 Prefs 供首页展示
         val default = Thread.getDefaultUncaughtExceptionHandler()
@@ -23,6 +33,8 @@ class LogApp : Application() {
             runCatching {
                 val stamp = System.currentTimeMillis()
                 val head = "thread=${thread.name}\ntime=$stamp\n\n" + throwable.stackTraceToString()
+                // 先写进自身运行日志：用户反馈时导出这一个文件就能带上崩溃现场
+                SelfLog.e("crash", "未捕获异常 thread=${thread.name}", throwable)
                 // 外部目录可能拿不到（存储已卸载/未挂载）：两份写入各自兜底，
                 // 外部目录失败不能挡住内部目录和 Prefs 里的崩溃记录
                 getExternalFilesDir(null)?.let { external ->

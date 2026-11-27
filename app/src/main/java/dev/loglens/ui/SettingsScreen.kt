@@ -168,13 +168,21 @@ fun SettingsScreen(
                         subtitle = "内存里滚动保留最近若干行，崩溃时把上文存成快照",
                         checked = preRecord
                     ) { on ->
-                        if (on && selected == null) {
+                        if (on && selected == null && prefs.lastPackage.isBlank()) {
                             Toast.makeText(context, "先选一个目标应用再开预录", Toast.LENGTH_SHORT).show()
                         } else {
                             preRecord = on
                             prefs.preRecord = on
                             if (on) {
-                                selected?.let { CaptureController.startPassive(it) }
+                                // 设设置页进来时可能没带当前选择：回退到上一次用过的目标应用
+                                val app = selected ?: AppRepository.resolve(context, prefs.lastPackage)
+                                if (app != null) {
+                                    CaptureController.startPassive(app)
+                                } else {
+                                    preRecord = false
+                                    prefs.preRecord = false
+                                    Toast.makeText(context, "找不到上次的目标应用，回首页重选后再开", Toast.LENGTH_SHORT).show()
+                                }
                             } else if (CaptureController.isPassive()) {
                                 CaptureController.stop()
                             }

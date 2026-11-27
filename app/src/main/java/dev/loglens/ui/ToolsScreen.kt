@@ -51,6 +51,7 @@ fun ToolsScreen(
     onOpenDiag: () -> Unit,
     onOpenForensics: () -> Unit,
     onOpenNet: () -> Unit,
+    onOpenFeedback: () -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -213,8 +214,37 @@ fun ToolsScreen(
                 }
             }
 
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    SectionHeader("问题反馈")
+                    Text(
+                        "LogLens 自己出问题时（采集拉不起来、悬浮窗不出现、直接崩了），这里摊开它自己的运行日志：" +
+                            "启动、授权、启停、Shizuku 断连、落盘失败、崩溃现场。一键复制或分享，贴到 issue 就行。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                    OutlinedButton(
+                        onClick = onOpenFeedback,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text("打开问题反馈")
+                    }
+                }
+            }
+
             Text(
-                text = "这三个工具都会自动带上首页选中的目标应用；换应用回首页重选即可。",
+                text = "前三个工具都会自动带上首页选中的目标应用；换应用回首页重选即可。",
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)

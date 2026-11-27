@@ -23,8 +23,10 @@ import dev.loglens.data.AppRepository
 import dev.loglens.data.LogBuffer
 import dev.loglens.data.Prefs
 import dev.loglens.service.CaptureService
+import dev.loglens.shizuku.ShizukuHelper
 import dev.loglens.ui.AppPickerScreen
 import dev.loglens.ui.DiagScreen
+import dev.loglens.ui.FeedbackScreen
 import dev.loglens.ui.ForensicsScreen
 import dev.loglens.ui.HomeScreen
 import dev.loglens.ui.LogScreen
@@ -65,7 +67,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { Home, Picker, Logs, Diag, Forensic, Settings, Tools, Net }
+private enum class Screen { Home, Picker, Logs, Diag, Forensic, Settings, Tools, Net, Feedback }
 
 @Composable
 private fun AppRoot(host: LogApp) {
@@ -78,6 +80,19 @@ private fun AppRoot(host: LogApp) {
         mutableStateOf(AppRepository.resolve(context, prefs.lastPackage))
     }
     var pendingStart by remember { mutableStateOf(false) }
+
+    // 预录开关在冷启动路径上真正生效：之前只有进设置页拨开关才会拉起，
+    // 重启后开关亮着却没有任何预录在跑（ADR 里那条已知缺陷）。
+    LaunchedEffect(Unit) {
+        val target = selected
+        if (prefs.preRecord && target != null &&
+            CaptureController.state.value is CaptureController.State.Idle &&
+            ShizukuHelper.isBinderAlive() &&
+            runCatching { ShizukuHelper.isPermissionGranted() }.getOrDefault(false)
+        ) {
+            CaptureController.startPassive(target)
+        }
+    }
 
     // 点击开始后，等引擎真正跑起来再进日志页，失败则留在首页看原因
     LaunchedEffect(state, pendingStart) {
@@ -100,7 +115,7 @@ private fun AppRoot(host: LogApp) {
     // 二级页返回：从诊断/取证回来落回工具箱，其余一律回首页
     BackHandler(enabled = screen != Screen.Home) {
         screen = when (screen) {
-            Screen.Diag, Screen.Forensic, Screen.Net -> Screen.Tools
+            Screen.Diag, Screen.Forensic, Screen.Net, Screen.Feedback -> Screen.Tools
             else -> Screen.Home
         }
     }
@@ -178,12 +193,19 @@ private fun AppRoot(host: LogApp) {
                 }
                 screen = Screen.Net
             },
+            onOpenFeedback = { screen = Screen.Feedback },
             onBack = { screen = Screen.Home }
         )
 
         Screen.Net -> NetScreen(
             selected = selected ?: prefs.lastPackage.takeIf { it.isNotBlank() }
                 ?.let { AppRepository.resolve(context, it) },
+            onBack = { screen = Screen.Tools }
+        )
+
+        Screen.Feedback -> FeedbackScreen(
+            prefs = prefs,
+            state = state,
             onBack = { screen = Screen.Tools }
         )
 

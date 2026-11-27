@@ -6,13 +6,18 @@ import dev.loglens.data.LogBuffer
 import dev.loglens.data.LogEntry
 import dev.loglens.data.LogRepository
 import dev.loglens.data.Prefs
+import dev.loglens.data.ProcNames
+import dev.loglens.diag.SelfLog
 import dev.loglens.logcat.CrashNotifier
 import dev.loglens.logcat.FileLogWriter
 import dev.loglens.logcat.LogcatEngine
+import dev.loglens.service.CaptureService
 import dev.loglens.shizuku.ShizukuHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -127,6 +132,11 @@ object CaptureController {
         lastArgs = args
         _paused.value = false
         if (!upgrading) _state.value = State.Preparing(app.label)
+        SelfLog.i(
+            "capture",
+            "开始 target=${app.packageName} uid=${app.uid} save=$saveToFile events=$includeEvents " +
+                "global=$globalMode buffers=${buffers.joinToString(",")} upgrade=$upgrading"
+        )
         launchEngine(args, clearFirst = !upgrading, sid = session.incrementAndGet())
     }
 
@@ -145,6 +155,9 @@ object CaptureController {
             globalMode = false,
             buffers = LogBuffer.DEFAULT
         )
+        // 预录也要走前台服务：否则切后台被系统回收，等真崩溃时上文早就没了
+        appContext?.let { CaptureService.start(it) }
+        SelfLog.i("capture", "预录开始 target=${app.packageName}")
     }
 
     fun isPassive(): Boolean = passive
@@ -157,6 +170,7 @@ object CaptureController {
         engine?.stop()
         engine = null
         _notice.value = "已暂停采集，可在通知或岛上点「继续」恢复"
+        SelfLog.i("capture", "暂停")
     }
 
     /** 继续：按暂停前的参数重新拉起 logcat，不清空已捕获日志 */
@@ -164,6 +178,7 @@ object CaptureController {
         val args = lastArgs ?: return
         if (!_paused.value) return
         _paused.value = false
+        SelfLog.i("capture", "继续 target=${args.app.packageName}")
         launchEngine(args, clearFirst = false, sid = session.incrementAndGet())
     }
 
@@ -177,13 +192,41 @@ object CaptureController {
             if (session.get() != sid) return
             restarting = false
             _state.value = State.Failed("Shizuku 服务未运行。请先启动 Shizuku（无线调试方式），再回到本页重试。")
+            SelfLog.w("capture", "启动中止：Shizuku binder 不可用 target=${app.packageName}")
             return
         }
         if (!ShizukuHelper.isPermissionGranted()) {
             if (session.get() != sid) return
             restarting = false
             _state.value = State.Failed("尚未获得 Shizuku 授权。请点击「请求授权」并在弹窗中允许。")
+            SelfLog.w("capture", "启动中止：未获得 Shizuku 授权 target=${app.packageName}")
             return
+        }
+
+        // pid → 进程名表：`package:` / `process:` 这类查询全靠它，之前全仓没人调用 refresh，
+        // 表永远是空的。会话期间每 10 秒刷一次，退出循环的唯一条件是令牌换代。
+        scope.launch {
+            var lastCount = -1
+            var lastFailAt = 0L
+            while (isActive && session.get() == sid) {
+                val ok = runCatching { ProcNames.refresh() }.getOrDefault(false)
+                if (!ok) {
+                    // Shizuku 忙时 ps 会偶发超时；表会沿用上一次的，日志里一分钟最多记一条
+                    val now = System.currentTimeMillis()
+                    if (now - lastFailAt > 60_000L) {
+                        SelfLog.w("procs", "ps 表刷新失败（沿用上一次，Shizuku 可能忙或已断）")
+                        lastFailAt = now
+                    }
+                } else {
+                    val n = ProcNames.snapshot().size
+                    if (n != lastCount) {
+                        SelfLog.i("procs", "ps 表就绪，${n} 个进程")
+                        lastCount = n
+                    }
+                    lastFailAt = 0L
+                }
+                delay(10_000L)
+            }
         }
 
         scope.launch {
@@ -235,6 +278,7 @@ object CaptureController {
                             command = command,
                             startedAt = System.currentTimeMillis()
                         )
+                        SelfLog.i("capture", "日志流就绪 target=${target.packageName} mode=$mode cmd=$command")
                     }
 
                     override fun onEntry(entry: LogEntry) {
@@ -264,6 +308,7 @@ object CaptureController {
                         // 主 logcat 失败时 events 流、看门狗线程还活着，必须一起收掉，否则会泄漏进程
                         self?.stop()
                         _state.value = State.Failed(message)
+                        SelfLog.e("capture", "采集失败 target=${target.packageName} msg=$message")
                         writer?.stop()
                         writer = null
                     }
@@ -272,6 +317,7 @@ object CaptureController {
                         if (engine !== self) return
                         // logcat 自然退出时 events 子流不会自己结束；先做一次完整收摊
                         self?.stop()
+                        SelfLog.i("capture", "日志流结束 exit=$code paused=${_paused.value} restarting=$restarting")
                         // 主动暂停 / 预录升级换代引发的退出：保留写入器与参数，别把新会话清掉
                         if (_paused.value || restarting) return
                         writer?.stop()
@@ -289,6 +335,7 @@ object CaptureController {
                         if (engine !== self) return
                         _logChannelBlocked.value = true
                         _notice.value = "日志通道被系统限制，点日志页上方的提示条查看解决办法"
+                        SelfLog.w("capture", "日志通道被限制 hint=$hint")
                     }
                 })
                 self = eng
@@ -322,6 +369,7 @@ object CaptureController {
             } catch (t: Throwable) {
                 // 换代或首次启动失败：必须复位 restarting，否则旧引擎的 onExit 会被永久吞掉
                 restarting = false
+                SelfLog.e("capture", "启动协程失败 target=${args.app.packageName}", t)
                 if (session.get() == sid) {
                     _state.value = State.Failed("启动失败：${t.message ?: t.javaClass.simpleName}")
                 }
@@ -347,6 +395,7 @@ object CaptureController {
         if (_state.value !is State.Failed) {
             _state.value = State.Idle
         }
+        SelfLog.i("capture", "停止（含收尾写盘）fromState=${_state.value.javaClass.simpleName}")
         scope.launch { runCatching { toClose?.stop() } }
     }
 

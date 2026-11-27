@@ -3,6 +3,7 @@ package dev.loglens.logcat
 import android.content.Context
 import dev.loglens.data.LogEntry
 import dev.loglens.data.Prefs
+import dev.loglens.diag.SelfLog
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
@@ -59,6 +60,7 @@ class FileLogWriter(private val context: Context) {
         lastRotateReason = null
         if (!openNext()) {
             // 拿不到可写目录：不要把「以为在落盘」的状态留给上层
+            SelfLog.e("writer", "落盘启动失败：${lastRotateReason}")
             throw java.io.IOException(lastRotateReason ?: "无法创建日志文件")
         }
         alive.set(true)
@@ -107,12 +109,15 @@ class FileLogWriter(private val context: Context) {
             // 轮转失败（存储满 / 被卸载）：停止写线程并清掉待排队列，避免继续假装落盘
             alive.set(false)
             queue.clear()
+            SelfLog.e("writer", "轮转失败，已停止落盘：${lastRotateReason}")
             return
         }
         lastRotateReason = "单文件达到 ${limitBytes() / 1024 / 1024} MB，已切到新分片"
     }
 
     private fun loop() {
+        // 写失败只报一次：存储满时每条日志都会失败，不能让 SelfLog 自己被刷屏
+        var writeFailed = false
         while (alive.get() || queue.isNotEmpty()) {
             val line: String? = try {
                 queue.poll(300L, TimeUnit.MILLISECONDS)
@@ -120,9 +125,19 @@ class FileLogWriter(private val context: Context) {
                 null
             }
             if (line != null) {
-                runCatching {
-                    writer?.write(line)
-                    writer?.write("\n")
+                if (!writeFailed) {
+                    val err = runCatching {
+                        writer?.write(line)
+                        writer?.write("\n")
+                    }.exceptionOrNull()
+                    if (err != null) {
+                        // 之前这里把 IOException 吞掉、alive 仍是 true：界面显示「落盘中」，实际早停了
+                        writeFailed = true
+                        alive.set(false)
+                        queue.clear()
+                        SelfLog.e("writer", "写入失败，已停止落盘", err)
+                        break
+                    }
                 }
                 sinceCheck++
                 if (sinceCheck >= 200) {
@@ -135,6 +150,7 @@ class FileLogWriter(private val context: Context) {
                             alive.set(false)
                             queue.clear()
                             lastRotateReason = "轮转失败：${it.message ?: it.javaClass.simpleName}"
+                            SelfLog.e("writer", "轮转异常，已停止落盘", it)
                         }
                     }
                 }
