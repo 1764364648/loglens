@@ -135,11 +135,23 @@ LogLens 自己要用 `su` 和 `Runtime.exec` 读日志，所以这里只降级�
 对 PR 里每个提交单独跑一遍文件规则（最多 20 个提交）。任何单个提交里出现阻断项 → 整体阻断。
 目的就是防「先加后撤」：净 diff 干净，过程不干净。
 
+## 机器人会在 PR 里说什么
+
+每次 PR 推送都会跑一遍，并在 PR 里更新同一条评论（靠隐藏标记去重，不会刷屏）：
+
+1. **结论**：不要合并 / 没有阻断项但有待确认 / 通过，附带阻断项数量。
+2. **改动概览**：新增/修改/删除各几个文件、主要文件类型；以及作者账号年龄、提交数、改动量这类元信息。
+3. **分类明细**：阻断项在前、待确认在后，按 14 个分类归组，每条都带文件路径和命中的那一行。
+4. **覆盖面表**：这次到底查了哪 14 类，避免"以为查了其实没查"。
+
+同时打标签：有阻断项 → `pr-audit: blocked`，通过 → `pr-audit: passed`（另一个会自动移除）。检查本身还是必需项，红着的时候合并按钮点不动——评论只是让人不用点进 Actions 才知道原因。
+
 ## 怎么跑
 
 ```bash
 python tools/pr_audit.py --pr 12 --repo 1764364648/loglens   # 线上 PR，默认逐提交复查
 python tools/pr_audit.py --pr 12 --no-commits                # 只想看净 diff
+python tools/pr_audit.py --pr 12 --comment                   # 顺手把报告发成 PR 评论
 python tools/pr_audit.py --range origin/main..HEAD           # 本地分支
 python tools/test_pr_audit.py                                # 规则自测（50 条）
 ```

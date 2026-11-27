@@ -418,6 +418,18 @@ def render(meta, files, findings):
         out.append("**结论：通过。**")
     out.append("")
     out.append(f"共 {len(files)} 个文件改动；只读 diff 文本，不执行 PR 里的代码。")
+    kinds = {}
+    for f in files:
+        p = (f.get("filename") or "").lower()
+        ext = Path(p).suffix or "(无后缀)"
+        kinds[ext] = kinds.get(ext, 0) + 1
+    st = {}
+    for f in files:
+        st[f.get("status", "modified")] = st.get(f.get("status", "modified"), 0) + 1
+    kind_txt = "、".join(f"{k} {v} 个" for k, v in sorted(kinds.items(), key=lambda x: -x[1])[:6])
+    st_txt = "、".join(f"{k} {v}" for k, v in st.items())
+    out.append(f"改动构成：{st_txt}；文件类型：{kind_txt}。")
+    out.append("")
     out.append("")
 
     def dump(group, marker):
@@ -458,7 +470,44 @@ def render(meta, files, findings):
     return "\n".join(out)
 
 
+def pr_comments(pr, repo, tok):
+    url = f"https://api.github.com/repos/{repo}/issues/{pr}/comments?per_page=100"
+    try:
+        return api(url, tok)
+    except Exception:
+        return []
+
+
+def upsert_comment(pr, repo, tok, body):
+    marker = "<!-- pr-audit-report -->"
+    full = marker + "\n" + body
+    for c in pr_comments(pr, repo, tok):
+        if marker in (c.get("body") or ""):
+            try:
+                return api(f"https://api.github.com/repos/{repo}/issues/{pr}/comments/{c['id']}", tok,
+                           method="PATCH", payload={"body": full})
+            except Exception:
+                pass
+    return api(f"https://api.github.com/repos/{repo}/issues/{pr}/comments", tok,
+               method="POST", payload={"body": full})
+
+
+def sync_label(pr, repo, tok, good):
+    want = "pr-audit: passed" if good else "pr-audit: blocked"
+    other = "pr-audit: blocked" if good else "pr-audit: passed"
+    try:
+        api(f"https://api.github.com/repos/{repo}/issues/{pr}/labels", tok,
+            method="POST", payload={"labels": [want]})
+    except Exception:
+        pass
+    try:
+        api(f"https://api.github.com/repos/{repo}/issues/{pr}/labels/{other}", tok, method="DELETE")
+    except Exception:
+        pass
+
+
 def token():
+
     for key in ("GITHUB_TOKEN", "GH_TOKEN"):
         if os.environ.get(key):
             return os.environ[key]
@@ -471,14 +520,17 @@ def token():
     return None
 
 
-def api(url, tok):
-    req = urllib.request.Request(url, headers={
+def api(url, tok, method="GET", payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
         "Accept": "application/vnd.github+json",
         "User-Agent": "loglens-pr-audit",
+        "Content-Type": "application/json",
         **({"Authorization": "Bearer " + tok} if tok else {}),
     })
     with urllib.request.urlopen(req, timeout=40) as r:
-        return json.load(r)
+        raw = r.read()
+        return json.loads(raw) if raw else {}
 
 
 def account_age_days(login, tok):
@@ -571,6 +623,7 @@ def main():
     ap.add_argument("--summary-file", help="把 Markdown 报告写到这里")
     ap.add_argument("--commits", action="store_true", help="本地范围时忽略")
     ap.add_argument("--no-commits", action="store_true", help="跳过逐提交复查")
+    ap.add_argument("--comment", action="store_true", help="把报告发成/更新成 PR 评论，并打上通过或阻断标签")
     args = ap.parse_args()
 
     if not args.pr and not args.range:
@@ -594,7 +647,18 @@ def main():
     print(report)
     if args.summary_file:
         Path(args.summary_file).write_text(report + "\n", encoding="utf-8")
-    return 1 if any(f.sev == BLOCK for f in findings) else 0
+
+    blocked = any(f.sev == BLOCK for f in findings)
+    if args.comment and args.pr:
+        tok = token()
+        if tok:
+            try:
+                upsert_comment(args.pr, args.repo, tok, report)
+                sync_label(args.pr, args.repo, tok, not blocked)
+                print("已在 PR 留言并同步标签")
+            except Exception as e:
+                print(f"留言失败（不影响审计结论）：{e}", file=sys.stderr)
+    return 1 if blocked else 0
 
 
 if __name__ == "__main__":
