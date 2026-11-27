@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 先看最新 Release 说明
+    url: https://github.com/1764364648/loglens/releases/latest
+    about: 每个版本的改动、已知限制、安装前置都写在里面
+  - name: 构建与环境问题
+    url: https://github.com/1764364648/loglens#构建
+    about: JDK、Android SDK、local.properties 这些配置问题先看 README 的构建一节

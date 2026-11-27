@@ -1,0 +1,114 @@
+name: 报告一个问题
+description: 采集/显示/落盘/悬浮窗不对劲，或者 LogLens 自己崩了
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提之前先花 30 秒确认三件事，能省一半来回：
+
+        1. 装的是 [最新 Release](https://github.com/1764364648/loglens/releases/latest)，不是旧包；
+        2. Shizuku 现在是活着的（打开 Shizuku App 看是否显示「运行中」，手机重启过就要重新激活一次）；
+        3. 搜一下 [已有 Issue](../../issues?q=is%3Aissue)，别重复提。
+
+        运行日志在 **工具箱 → 问题反馈 → 复制诊断**，贴进来比描述一百句都有用。里面只有 LogLens 自己的动作记录，不含被采集应用的内容。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提之前确认过
+      options:
+        - label: 已使用最新 Release，且搜过已有 Issue
+          required: true
+        - label: Shizuku 已激活并显示「运行中」（重启后重新激活过）
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: LogLens 版本
+      description: 设置 → 关于 里的版本号和 code，例如 1.2.5 (7)
+      placeholder: 1.2.5 (7)
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: 机型与系统
+      description: 品牌型号 + Android 版本 + ROM（原生 / MIUI / HyperOS / ColorOS / 鸿蒙等）
+      placeholder: 荣耀 Magic6 / Android 15 / MagicOS 9
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shizuku
+    attributes:
+      label: Shizuku 状态
+      options:
+        - 已激活，显示「运行中」
+        - 显示已安装但没运行
+        - 刚重启手机，还没重新激活
+        - 不确定 / 不知道这是什么
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题出在哪块
+      multiple: true
+      options:
+        - 采集拉不起来 / 一开始就报错
+        - 日志不显示或明显缺内容
+        - 暂停、续流、丢条数
+        - 落盘与导出（文件没有或打不开）
+        - 悬浮窗胶囊与选中应用
+        - LogLens 自己崩溃或闪退
+        - 选择应用、搜索、筛选等界面问题
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从打开 App 开始，一步步写清楚；能稳定复现就说「每次都这样」，偶发就说大概几次里出一次
+      placeholder: |
+        1. 打开 LogLens，选 AdGuard Lite
+        2. 点开始捕获
+        3. 切到桌面再切回来
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望 vs 实际
+      description: 你以为会发生什么，实际看到的是什么（有截图更好，直接拖进这个框）
+      placeholder: |
+        期望：切回来还能看到全部日志
+        实际：列表只剩十几条，计数也归零了
+    validations:
+      required: true
+
+  - type: textarea
+    id: selflog
+    attributes:
+      label: 运行日志（强烈建议）
+      description: 工具箱 → 问题反馈 → 复制诊断，粘到这里。用发行包时可直接贴文本
+      render: text
+      placeholder: "11-27 09:44:47.145 I/app: 启动 v1.2.5 (7) ..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 做过什么特殊操作（改过电池优化、开了省电模式、装了 LSPatch/Xposed、用了分身、日志文件多大……）
+    validations:
+      required: false
