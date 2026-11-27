@@ -12,7 +12,7 @@
 
 ## 它怎么跑
 
-工作流 `.github/workflows/pr-review.yml`。**默认不自动跑**：`pull_request_target` 只在 PR 被加上 `ai-review` 标签时触发（草稿不跑），另有 `workflow_dispatch` 可手动指定 PR 编号。原来是 `opened` / `synchronize` / `reopened` / `ready_for_review` 每个事件都跑，改成按需的理由见本文末「为什么不自动跑」。
+工作流 `.github/workflows/pr-review.yml`，`pull_request_target` 触发（`opened` / `synchronize` / `reopened` / `ready_for_review`），草稿不跑。
 
 1. 先从**基线提交**取 `tools/pr_review.py`，PR 里改这个文件对本次评审没影响。
 2. 跑一遍 70 条自测（渲染、去重标记转义、预算取样（每文件保底 / hunk 切分 / 源码优先回填 / 覆盖记账）、严重度分组、评审负担归一、改动归组、反馈解析、标签映射、CI 结论判定、模型队列轮换），脚本被改坏会先在这里红。
@@ -133,22 +133,9 @@ python tools/pr_review.py --pr 12 --repo owner/name --stats              # 误�
 
 ## 成本与边界
 
-- 单次约 3 万～4 万输入 token、2 千输出 token；`audit` 没过的 PR 不跑，草稿不跑，同一 PR 再次触发会取消上一次（按 PR 编号去重）。
+- 单次约 3 万～4 万输入 token、2 千输出 token；`audit` 没过的 PR 不跑，草稿不跑，同一 PR 新 push 会取消上一次。
 - 它是评审意见，不是放行依据：`main` 的合并仍由「`pr-audit` 必须绿 + 1 次人工批准 + CODEOWNERS」决定。
 - 信息不足时它应该回答“存疑”，而不是猜；看到“存疑”就当你自己要多看一眼。
-
-## 为什么不自动跑
-
-单人仓库里 PR 密度很低。原来 `opened` / `synchronize` / `reopened` / `ready_for_review` 全触发，
-实际等于「自己提一次、机器人评一次」，而它解决的问题——多人协作时 PR 质量参差——在这里并不存在，
-边际收益接近零。
-
-同时它和 App 的「日志不出本机」构成一种张力：CI 会把 PR 的 diff 全文、标题、描述、
-提交信息发给第三方模型网关（没配 key 时的免费网关就是零密钥公开服务）。两套信任模型可以并存，
-但没必要为了「自动」把这件事的频率抬到每个事件一次。
-
-所以改成：只在 PR 被打上 `ai-review` 标签，或手动 dispatch 指定编号时跑。脚本、规则、
-70 条自测全部保留——它仍然能在「想让人再看一眼」的时候派上用场，只是不再默认替你跑。
 
 
 

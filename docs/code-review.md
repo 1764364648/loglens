@@ -386,11 +386,11 @@ README 的 R8 描述同步改成「自有类名与方法名会被重命名，只
 
 拆成两半：`beginCrashSnapshot()` 留在读线程，只做内存取值——目录、时间戳、目标应用、`recent(200)` 快照，并且先把 `lastSnapshotAt` 占位，避免同一波崩溃（SIGABRT 会连刷十几行）各自排队写一次；`writeCrashSnapshot()` 丢进 `scope.launch`，在 IO 上做 `mkdirs`、轮转删旧、写文件，写完再 `_notice` 提示。
 
-**C. 那 2245 行 CI 工具确实用过头了——不删，改成默认不跑。** `tools/pr_review.py` 1169 行 + `tools/pr_audit.py` 680 行 + `tools/check_docs.py` 179 行，比 App 里任何一个模块都重。它要解决的问题是「多人协作时 PR 质量参差」，而这里是单人仓库、一天几十个提交，边际收益接近零；更别扭的是它和「日志不出本机」构成张力——AI 评审会把 PR 的 diff 全文、标题、描述、提交信息发给第三方模型网关。
+**C. 那 2245 行 CI 工具「用过头」——核了，结论是保留原生触发，不收敛。** `tools/pr_review.py` 1169 行 + `tools/pr_audit.py` 680 行 + `tools/check_docs.py` 179 行，比 App 里任何一个模块都重，体量上评审没说错。它要解决的问题确实是「多人协作时 PR 质量参差」，单人仓库的边际收益也的确不高；PR 的 diff 全文会发给第三方模型网关，和「日志不出本机」也构成张力。
 
-处理方式是收窄触发，不是删文件：`.github/workflows/pr-review.yml` 从「`opened` / `synchronize` / `reopened` / `ready_for_review` 全触发」改成「PR 打 `ai-review` 标签，或手动 `workflow_dispatch` 指定编号」；`pr-audit` 保持自动——它不联网、不花 token、纯本地规则，守的是「依赖/权限被偷改」，成本可以忽略；`check_docs` 留在 `.github/workflows/build.yml`，数字校验确实是这套工具里最该留的那部分。理由写进 `security/ai-review.md` 的「为什么不自动跑」，SECURITY.md 第 6 条同步改口径。
+但这不叫复杂度失控，这套管线是刻意建的：PR 自动评审就是它存在的理由，`pr-audit` 守依赖与权限、`check_docs` 守文档里的引用和数字、`pr_review` 守「合并之前至少被完整读一遍」。改成「打标签才跑」等于把它降级成摆设，收益反而是负的。所以触发条件维持原样（`opened` / `synchronize` / `reopened` / `ready_for_review`，草稿不跑），只把外发范围说清楚——`SECURITY.md` 第 6 条和 `security/ai-review.md` 已经写明「diff、标题、描述、提交信息会发给第三方网关」，接受这个代价本来就是接受自动评审的前提。
 
-验证：单测 86 条 0 失败、lint 0 error / 87 warning、`assembleDebug` 通过、workflow 用 PyYAML 解析确认 `on` / `if` / `PR: ${{ ... || inputs.pr }}` 三处合法、`check_docs` 全绿。
+验证：单测 86 条 0 失败、lint 0 error / 87 warning、`assembleDebug` 通过、`check_docs` 126 处引用有效。
 
 
 

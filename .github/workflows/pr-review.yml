@@ -5,20 +5,10 @@ name: PR 评审（AI）
 # 不合并、不关闭、不批准 —— 要不要关掉由维护者决定。
 # 免费：没配 LLM_API_KEY 时走零密钥的免费网关；配了就用配置的模型。
 # 百炼按队列跑（LLM_MODELS 可覆盖）：一个模型免费额度用完自动换下一个。
-#
-# 默认不自动跑。单人仓库、一天几十个提交，「每个 PR 都评一遍」的边际收益接近零，
-# 而且会把 PR 的 diff 全文发给第三方模型网关（它和 App 里「日志不出本机」是两套
-# 信任模型，但仍应尽量减少外发）。要评审时：在 PR 上打 `ai-review` 标签，
-# 或手动 dispatch 并给出 PR 编号。
 on:
   pull_request_target:
     branches: [main]
-    types: [labeled]
-  workflow_dispatch:
-    inputs:
-      pr:
-        description: PR 编号
-        required: true
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -26,16 +16,14 @@ permissions:
   issues: write
 
 concurrency:
-  group: pr-review-${{ github.event.pull_request.number || inputs.pr }}
+  group: pr-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   pr-review:
     name: pr-review
     runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'workflow_dispatch' || github.event.label.name == 'ai-review')
-      && (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false)
+    if: github.event.pull_request.draft == false
     steps:
       - name: 从基线取评审脚本（不执行 PR 代码）
         env:
@@ -65,7 +53,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          PR: ${{ github.event.pull_request.number }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
