@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  分享白名单：只放开实际会往外发的目录。
+  不要再用 files-path / cache-path 的 path="." —— 那等于把整个私有目录都挂到 content:// 下。
+  新增可分享目录时，必须在这里显式加一行。
+-->
 <paths>
     <external-files-path
         name="exports"
@@ -9,10 +14,32 @@
     <external-files-path
         name="capture"
         path="capture/" />
+    <external-files-path
+        name="crash"
+        path="crash/" />
+
+    <!-- 外部存储不可用（卸载/未挂载）时，落盘与取证会回退到内部 files/，逐个列出 -->
     <files-path
-        name="inner"
-        path="." />
+        name="inner_exports"
+        path="exports/" />
+    <files-path
+        name="inner_forensics"
+        path="forensics/" />
+    <files-path
+        name="inner_capture"
+        path="capture/" />
+    <files-path
+        name="inner_crash"
+        path="crash/" />
+    <files-path
+        name="inner_self_log"
+        path="self_log/" />
+    <files-path
+        name="inner_self_crash"
+        path="self_crash/" />
+
+    <!-- 问题反馈把自身日志打包到 cache/feedback/ -->
     <cache-path
-        name="cache"
-        path="." />
+        name="feedback"
+        path="feedback/" />
 </paths>

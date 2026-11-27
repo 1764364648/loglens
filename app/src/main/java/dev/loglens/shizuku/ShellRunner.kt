@@ -23,9 +23,13 @@ object ShellRunner {
      * 修法两条并用：
      * 1. 命令尾部挂 `sleep 0.6` 保活，保证进程存活到读线程读完（退出码原样透传）；
      * 2. 不先 waitFor，而是**以读线程读到 EOF 为准**，读完再取退出码，避免提前 destroy 把管道一起关掉。
+     *
+     * 包装方式用换行而不是 `{ cmd ; }`：`{}` 分组遇到命令里出现 `}` 会被提前闭合，
+     * 整条命令静默跑成半截。换行拼接下，`$?` 取到的仍是上面那条命令的退出码，语义不变。
+     * 调用方仍需保证命令自身不以换行结尾、不中途 `exit`。
      */
     fun exec(command: String, timeoutMs: Long = 12_000L): Result {
-        val wrapped = "{ $command ; } ; __sl_rc=\$? ; sleep 0.6 ; exit \$__sl_rc"
+        val wrapped = "$command\n__sl_rc=\$?\nsleep 0.6\nexit \$__sl_rc"
         val process = ShizukuProcess.newProcess(arrayOf("sh", "-c", wrapped), null, null)
             ?: return Result(-1, "", "无法通过 Shizuku 创建进程")
         val out = StringBuilder()

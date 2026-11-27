@@ -170,7 +170,9 @@ class CaptureService : Service() {
                 "会话保留 · 已捕获 ${formatCount(AppGraph.logs.statsSnapshot().total)} 条，点「继续」接着抓"
             } else {
                 val stats = AppGraph.logs.statsSnapshot()
-                "已捕获 ${formatCount(stats.total)} 条 · 崩溃 ${stats.crashes}"
+                // 这个数是「崩溃行数」（isCrash 是逐行关键字匹配，一条异常会贡献好几行），
+                // 不是崩溃次数；按异常签名归集的次数在 CrashStats，两处措辞必须区分开
+                "已捕获 ${formatCount(stats.total)} 条 · 崩溃行 ${stats.crashes}"
             }
         }
 

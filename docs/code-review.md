@@ -338,4 +338,25 @@ README 的 R8 描述同步改成「自有类名与方法名会被重命名，只
 
 验证：单测条数 80 → 84（0 失败）、lint 0 error / 87 warning 不变、`assembleRelease` 通过（R8 真跑，mapping 改名如上）、`tools/check_docs.py` 113 处引用全部有效、`tools/pr_review.py --selftest` 70 条不变。
 
+### 15. 第六轮外部评审：七条逐条核实，六条落地、一条明确不动
+
+七条逐条对照源码核实：**六条成立并已改**，第四条成立但本轮不动（理由见该条）。另有一条（第 3 条后半）的指控不成立。
+
+**① 一键清空整机日志缓冲没有二次确认 —— 成立。** `BufferDialog` 原来 `TextButton(onClick = onClearDevice)` 一下点就执行，落到 `LogScreenPanels.kt` 的 `Thread { ShellRunner.exec("logcat -b all -c") }`。这一步清的是**整机所有 App** 的缓冲，不只是被采集的那个，而 `LogcatEngine.kt` 自己写过注释「`-G` 会清空缓冲、实测踩过一次」。改成两步：先点「清空设备日志缓冲（`logcat -b all -c`）」，展开后红字说明「这会清掉整机所有 App 的日志缓冲（包括没在抓的），清完无法恢复」，再点「确认清空」。
+
+**② FileProvider 用 `path="."` 暴露整个私有目录 —— 成立。** `res/xml/file_paths.xml` 原来是 3 条 `external-files-path` + `<files-path name="inner" path="." />` + `<cache-path name="cache" path="." />`，等于整个 `files/` 与 `cache/` 都能通过 `content://` 读出，而分享入口只有 `Exporter.kt:40` 与 `ExportFormats.kt:296` 两处。按实际目录清单收成显式白名单：外部 `exports/` `forensics/` `capture/` `crash/`；内部 `exports/` `forensics/` `capture/` `crash/` `self_log/` `self_crash/`；cache 只留 `feedback/`。文件头加一行「新增可分享目录必须显式加一行」。
+
+**③ 通知里的「崩溃 N」是行数不是次数 —— 数确实打架，但「release 只有标题」不成立。** `CaptureService.kt` 的 `"崩溃 ${stats.crashes}"` 来自逐行 `isCrash()` 命中数（一条异常会占 `Process:` / `FATAL EXCEPTION` / `backtrace:` 好几行），而 `CrashStats` 按异常签名聚合出 today/week/total，于是同一个崩溃在通知里显示 5、在统计面板显示 1。已把通知改成「崩溃行 N」，`isCrash` 的 KDoc 补一句「它的计数是崩溃行数，次数在 CrashStats」。反过来，v1.2.5 的 release body 实际有 1705 字节（不是「只有一个标题」）；真正缺的是 v1.2.1–v1.2.4 四个旧 tag 的 release notes，本轮用 CHANGELOG 段落回填。
+
+**④ `CaptureController` 仍是 `object` 单例，改造只做了一半 —— 成立，本轮明确不动。** 现状是 `object CaptureController` + `fun init(context: Context)` + `CaptureHooks.allowWithoutContext` 测试后门，全仓库 `CaptureController.` 引用 88 处 / 9 个文件（`CaptureService` 40、`MainActivity` 16、`FeedbackScreen` 8、`HomeScreen` 7、`SettingsScreen` 6、`LogScreen` 5、`LogScreenChrome` 3、`LogScreenTools` 2、`LogApp` 1），`CaptureControllerTest` 正是靠 `init(context)` 塞假引擎。真做要动 88 个调用点，而这条链路（Shizuku 授权 → 起进程 → uid 抓流）的回归只能真机跑，本轮同时改了日志解析状态模型，两者叠加会让「谁坏了」无法定位——所以按「一轮只动一组」的原则推后。推荐形态（下一轮做）：`class CaptureSession(deps)` 承载全部逻辑，`object CaptureController` 退化成门面只做委托，`install(impl)` 供测试注入，调用点一行不用改、测试改 3 行。
+
+**⑤ 年份推断状态全局可变、两路流共享 —— 成立。** `LogcatParser` 的 `lastYear/lastMonth/dateKey` 是 object 全局，而 `LogcatEngine` 的 `readEvents` 与 `readStdout` 是两个线程同时 parse：events 流里的 `-v year` 日期会把 `lastMonth` 顶到 12 月，主日志流下一次「1 月」行就会被判成跨年进位，整段年份错位。改法：年份状态抽成 `class Clock`（`reset()` / `fullDate()` 内部 `synchronized(this)`），object 持一个 `defaultClock` 供单测与老调用方用，引擎给两路各持一个 `stdoutClock` / `eventsClock`，`start()` 里三个一起 reset。**构建时踩到一个坑**：`parse` 原签名是 `(line, nextId, clock = defaultClock)`，而测试与部分调用写 `parse(line) { nextId++ }`——尾随 lambda 会绑到**最后一个**参数 `clock` 上，编译报 `() -> Long` 与 `Clock` 类型不符。参数顺序改为 `(line, clock = defaultClock, nextId)` 后自然解决。新增单测「年份状态按 clock 隔离：events 的日期不会带偏 main」。
+
+**⑥ `ShellRunner.exec` 用 `{ cmd ; }` 分组 —— 成立。** 原 wrapped 是 `"{ $command ; } ; __sl_rc=$? ; sleep 0.6 ; exit $__sl_rc"`。`{ }` 是 shell 的分组语法，命令里只要出现 `}`（比如 `sh -c` 里拼 JSON、或包名/路径里带花括号），分组就提前闭合，剩下的半截被当新命令执行。改成按换行拼接：`"$command\n__sl_rc=$?\nsleep 0.6\nexit $__sl_rc"`，语义不变（`$?` 仍是前面命令的退出码），注释补明「调用方保证命令不以换行结尾、不中途 `exit`」。
+
+**⑦ 缺 CONTRIBUTING / CHANGELOG / release notes —— 成立。** 根目录原来只有 README + SECURITY，`.github/` 里模板、CODEOWNERS、四个 workflow 都齐，唯独没有面向贡献者的说明与版本记录。新增 `CHANGELOG.md`（v1.2.1 → 1.2.5 + 未发布段，条目取自真实 tag 与提交，不编造）与 `CONTRIBUTING.md`（提 Issue 前先走「问题反馈」贴自身日志、一个 PR 只做一件事、CI 必须绿、不新增联网 SDK、依赖变更同步 `verification-metadata.xml`、纯逻辑补 JVM 单测、明确不接受 root / VpnService 抓包 / 换皮收费），README 的「许可」前加「更新记录与参与改进」两行链接。
+
+验证：单测 84 → 85（0 失败，新增 clock 隔离用例）、lint 0 error / 87 warning、`assembleDebug` 通过、`tools/check_docs.py` 113 处引用全部有效、`tools/pr_review.py --selftest` 70 条。README 里「84 条单测」同步改成 85（`check_docs.py` 的计数校验抓到的就是这个）。
+
+
 

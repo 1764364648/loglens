@@ -127,6 +127,11 @@ class LogcatEngine(private val listener: Listener) : LogcatSource {
     /** 全量模式：不按 uid/pid 过滤，连 events 一起抓（含事件缓冲，等于整机镜像） */
     private var globalMode: Boolean = false
 
+    // 年份推断状态按日志流分开：主日志流与 events 流是两个线程同时解析，
+    // 共用一份时 events 的日期会把 main 的 lastMonth 顶来顶去，跨年判断整段错位
+    private val stdoutClock = LogcatParser.Clock()
+    private val eventsClock = LogcatParser.Clock()
+
     fun isRunning(): Boolean = running.get()
 
     override fun start(
@@ -139,9 +144,13 @@ class LogcatEngine(private val listener: Listener) : LogcatSource {
     ) {
         stop()
 
-        // 年份推断缓存是进程级的单例状态，重启会话时清一次：
+        // 年份推断状态是进程级缓存的，重启会话时清一次：
         // 设备时间被手动改过（跨年）时，不清会把去年的日志按今年解析
-        runCatching { LogcatParser.resetClock() }
+        runCatching {
+            LogcatParser.resetClock()
+            stdoutClock.reset()
+            eventsClock.reset()
+        }
 
         this.packageName = packageName
         this.targetUid = uid ?: 0
@@ -443,7 +452,9 @@ class LogcatEngine(private val listener: Listener) : LogcatSource {
                 // events 的 payload 形如 [0,4321,com.tencent.mm,u0a123,activity]，按包名筛即可
                 if (!pkgHit.containsMatchIn(line)) continue
                 lastDataAt = System.currentTimeMillis()
-                val entry = runCatching { LogcatParser.parse(line) { AppGraph.logs.nextId() } }.getOrNull()
+                val entry = runCatching {
+                    LogcatParser.parse(line, eventsClock) { AppGraph.logs.nextId() }
+                }.getOrNull()
                 if (entry != null) {
                     emit(entry.copy(tag = "evt/" + entry.tag))
                 }
@@ -479,7 +490,7 @@ class LogcatEngine(private val listener: Listener) : LogcatSource {
                         val accept = acceptAll || pidSet.contains(pid)
                         lastAccepted = accept
                         if (!accept) continue
-                        val entry = LogcatParser.parse(line) { AppGraph.logs.nextId() }
+                        val entry = LogcatParser.parse(line, stdoutClock) { AppGraph.logs.nextId() }
                         if (entry != null) {
                             lastTime = entry.time
                             lastTag = entry.tag
@@ -509,7 +520,7 @@ class LogcatEngine(private val listener: Listener) : LogcatSource {
                         continue
                     }
 
-                    val entry = LogcatParser.parse(line) { AppGraph.logs.nextId() }
+                    val entry = LogcatParser.parse(line, stdoutClock) { AppGraph.logs.nextId() }
                     if (entry != null) {
                         if (entry.pid > 0 && pidSet.contains(entry.pid)) {
                             lastAccepted = true

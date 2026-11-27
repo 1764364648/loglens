@@ -987,6 +987,8 @@ fun BufferDialog(
     onClearDevice: () -> Unit = {}
 ) {
     val colors = MaterialTheme.colorScheme
+    // `logcat -b all -c` 清的是整机所有 App 的缓冲、不可恢复：必须两步确认，不能一个按钮直接执行
+    var confirmClear by remember { mutableStateOf(false) }
     val all = listOf(
         "main" to "应用日志",
         "system" to "系统日志",
@@ -1007,12 +1009,37 @@ fun BufferDialog(
                     color = colors.onSurfaceVariant
                 )
                 Spacer(Modifier.height(10.dp))
-                TextButton(onClick = onClearDevice) {
+                if (!confirmClear) {
+                    TextButton(onClick = { confirmClear = true }) {
+                        Text(
+                            "清空设备日志缓冲（logcat -b all -c）",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = LocalLogPalette.current.warn
+                        )
+                    }
+                } else {
                     Text(
-                        "清空设备日志缓冲（logcat -b all -c）",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = LocalLogPalette.current.warn
+                        "这会清掉整机所有 App 的日志缓冲（包括没在抓的），清完无法恢复。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LocalLogPalette.current.error
                     )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { confirmClear = false }) {
+                            Text("取消", style = MaterialTheme.typography.labelMedium)
+                        }
+                        TextButton(
+                            onClick = {
+                                confirmClear = false
+                                onClearDevice()
+                            }
+                        ) {
+                            Text(
+                                "确认清空",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = LocalLogPalette.current.error
+                            )
+                        }
+                    }
                 }
                 TextButton(
                     onClick = { all.map { it.first }.filter { !selected.contains(it) }.forEach(onToggle) }

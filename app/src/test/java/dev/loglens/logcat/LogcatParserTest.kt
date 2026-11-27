@@ -166,4 +166,22 @@ class LogcatParserTest {
         val noYear = parse("11-28 10:00:00.000  1  1 I T: b")!!
         assertEquals("2026", noYear.time.substring(0, 4))
     }
+
+    @Test
+    fun `年份状态按 clock 隔离：events 的日期不会带偏 main`() {
+        val main = LogcatParser.Clock()
+        val events = LogcatParser.Clock()
+        // events 一路先跑，并且是 -v year 的日期：它自己那份状态被设成 12 月
+        val ev = LogcatParser.parse(
+            "2026-12-31 23:59:59.000 I/am_proc_start(  1): [0,1,com.a,activity]",
+            events
+        ) { nextId++ }
+        assertNotNull(ev)
+        assertEquals("2026-12-31", ev!!.time.substring(0, 10))
+        // main 一路是 1 月。如果两路共用一份状态，1 < 12-6 会被判成「跨年进位」→ 2027；
+        // 隔离后 main 的 lastMonth 仍是 -1，按「本月之后的月份算去年」规则应落在今年
+        val jan = LogcatParser.parse("01-05 10:00:00.000  1  1 I T: a", main) { nextId++ }!!
+        val nowYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR).toString()
+        assertEquals(nowYear, jan.time.substring(0, 4))
+    }
 }
