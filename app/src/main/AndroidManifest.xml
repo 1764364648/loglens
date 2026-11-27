@@ -39,10 +39,18 @@
         android:theme="@style/Theme.LogLens"
         tools:targetApi="36">
 
+        <!--
+          configChanges：横屏 / 分屏 / 折叠屏形态变化时**不重建** Activity。
+          日志工具最典型的用法就是横过来看长堆栈行；一旦重建，LogScreen 里 39 个
+          remember 状态（搜索词、筛选、选中、折叠展开）全部清零、界面弹回首页，
+          而采集是单例 StateFlow、压根没断——损失纯属界面自找。
+          Compose 自己会跟着新的 Configuration 重排，不需要重建。
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.LogLens">
             <intent-filter>

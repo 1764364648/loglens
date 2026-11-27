@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  界面文案目前只有中文一套，不要建空的 values-en / values-xx 目录。
+  2026-11 删过一次 values-en：里面只有 3 条英文，而源码里是 800 多处硬编码中文，
+  语言设置里看着「支持英文」，切过去还是中文，比不做更误导。
+  真要做国际化，先把界面文案搬进这里，再建语言目录。
+-->
 <resources>
     <string name="app_name">日志透镜</string>
     <string name="capture_channel_name">日志捕获</string>
