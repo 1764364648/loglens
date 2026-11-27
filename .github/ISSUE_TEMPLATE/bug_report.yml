@@ -100,7 +100,6 @@ body:
     attributes:
       label: 运行日志（强烈建议）
       description: 工具箱 → 问题反馈 → 复制诊断，粘到这里。用发行包时可直接贴文本
-      render: text
       placeholder: "11-27 09:44:47.145 I/app: 启动 v1.2.5 (7) ..."
     validations:
       required: false
